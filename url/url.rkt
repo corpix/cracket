@@ -7,10 +7,10 @@
          (struct-out url)
          make-url
 
-         url-escape?
-         url-escaped?
-         url-escape
-         url-unescape
+         url-encode?
+         url-encoded?
+         url-encode
+         url-decode
 
          url-trim-anchor
 
@@ -78,11 +78,11 @@
 
 ;;
 
-(define url-escape-modes
+(define url-encode-modes
   '(path path-segment host zone user query-component fragment))
 
 ;; https://tools.ietf.org/html/rfc3986
-(define (url-escape? n (mode #f))
+(define (url-encode? n (mode #f))
   ;; see: https://golang.org/src/net/url/url.go?#L100
   (cond
     ((or (and (>= n #x61) (<= n #x7a))                       ;; a-z
@@ -143,21 +143,21 @@
        (else #t)))                                           ;;
     (else #t)))
 
-(define (url-escaped? u (mode #f))
+(define (url-encoded? u (mode #f))
   (let loop ((l (string-length u)) (n 0))
     (if (>= n l) #t
         (let ((c (char->integer (string-ref u n))))
-          (and (or (= #x25 c) (not (url-escape? c mode)))
+          (and (or (= #x25 c) (not (url-encode? c mode)))
                (loop l (+ 1 n)))))))
 
-(define (url-escape u (mode #f))
+(define (url-encode u (mode #f))
   (define len (string-length u))
   (define-values (space-count hex-count)
     (let loop ((n 0) (space 0) (hex 0))
       (if (= n len)
           (values space hex)
           (let ((c (char->integer (string-ref u n))))
-            (if (url-escape? c mode)
+            (if (url-encode? c mode)
                 (if (and (= #x20 c) (eq? 'query-component mode)) ;; space
                     (loop (+ 1 n) (+ 1 space) hex)
                     (loop (+ 1 n) space (+ 1 hex)))
@@ -171,7 +171,7 @@
                (cond ((and (= #x20 c) (eq? 'query-component mode)) ;; space
                       (bytes-set! buf i #x2b) ;; +
                       (loop buf (+ 1 n) (+ 1 i)))
-                     ((url-escape? c mode)
+                     ((url-encode? c mode)
                       (bytes-set! buf i #x25) ;; %
                       (bytes-set! buf (+ 1 i) (integer->hex-char (arithmetic-shift c -4)))
                       (bytes-set! buf (+ 2 i) (integer->hex-char (bitwise-and c 15)))
@@ -180,7 +180,7 @@
                       (bytes-set! buf i c)
                       (loop buf (+ 1 n) (+ 1 i))))))))))
 
-(define (url-unescape u (mode #f))
+(define (url-decode u (mode #f))
   (define len (string-length u))
   (define-values (i plus?)
     (let loop ((n 0) (i 0) (plus? #f))
@@ -192,32 +192,32 @@
                (when (or (>=  (+ 2 n) len) ;; incomplete hex byte
                          (not (hex-char? (string-ref u (+ 1 n))))
                          (not (hex-char? (string-ref u (+ 2 n)))))
-                 (error "escape error at:"
+                 (error "encode error at:"
                         (substring u (if (> (+ 3 n) len) (+ 3 n) n) len)))
                (case mode
                  ((host)
                   ;; https://tools.ietf.org/html/rfc3986#page-21
                   ;; https://tools.ietf.org/html/rfc6874#section-2
                   ;; first says %-encoding can only be used for non-ASCII bytes
-                  ;; second says %25 could be used to escape percent sign in IPv6 addr
+                  ;; second says %25 could be used to encode percent sign in IPv6 addr
                   (when (not (equal? "%25" (substring u n (+ 3 n))))
-                    (error "escape error at:" (substring u n len))))
+                    (error "encode error at:" (substring u n len))))
                  ((zone)
                   (let ((nibble (bitwise-ior
                                  (arithmetic-shift (hex-char->integer (string-ref u (+ 1 n))) 4)
                                  (hex-char->integer (string-ref u (+ 2 n))))))
                     (when (and (not (equal? "%25" (substring u n (+ 3 n))))
                                (= #x20 nibble)
-                               (url-escape? nibble 'host))
-                      (error "escape error at:" (substring u n len)))))
+                               (url-encode? nibble 'host))
+                      (error "encode error at:" (substring u n len)))))
                  (else (loop (+ 3 n) (+ 1 i) plus?))))
               ((= #x2b c) ;; +
                (loop (+ 1 n) i (eq? 'query-component mode)))
               ((and (or (eq? 'host mode)
                         (eq? 'zone mode))
                     (> #x80 c)
-                    (url-escape? c mode))
-               (error "invalid host error at:" c (url-escape? c mode) (> #x80 c) (substring u n len)))
+                    (url-encode? c mode))
+               (error "invalid host error at:" c (url-encode? c mode) (> #x80 c) (substring u n len)))
               (else (loop (+ 1 n) i plus?)))))))
   (if (and (eq? 0 i) (not plus?)) u
       (bytes->string/utf-8
@@ -283,9 +283,9 @@
             (if (= n len)
                 (let ((info (string-split user #\:)))
                   (values #t
-                          (cons (url-unescape (car info) 'user)
+                          (cons (url-decode (car info) 'user)
                                 (and (pair? (cdr info))
-                                     (url-unescape (cadr info) 'user)))
+                                     (url-decode (cadr info) 'user)))
                           (substring u
                                      (+ 1 delim)
                                      (string-length u))))
@@ -324,14 +324,14 @@
                    #t
                    (if zone
                        (string-append/shared
-                        (url-unescape (substring address 0 zone) 'host)
-                        (url-unescape (substring address zone (+ 1 close-bracket)) 'zone))
-                       (url-unescape address 'host))
+                        (url-decode (substring address 0 zone) 'host)
+                        (url-decode (substring address zone (+ 1 close-bracket)) 'zone))
+                       (url-decode address 'host))
                    (substring u (+ 1 close-bracket) (string-length u))))
                 (let ((colon (string-index uu #\:)))
                   (values
                    #t
-                   (url-unescape
+                   (url-decode
                     (if colon (substring uu 0 colon) uu)
                     'host)
                    (substring u (or colon end))))))))))
@@ -361,7 +361,7 @@
         (slash (string-index u #\/)))
     (if (and slash (= 0 slash))
         (values #t
-                (url-unescape (substring u slash query) 'path)
+                (url-decode (substring u slash query) 'path)
                 (substring u query))
         (values #f "" u))))
 
@@ -402,7 +402,7 @@
 
 (define (url-produce-host u)
   (if (url-host? u)
-      (url-escape (url-host u) 'host)
+      (url-encode (url-host u) 'host)
       ""))
 
 (define (url-produce-port u)
@@ -413,8 +413,8 @@
 (define (url-produce-path u)
   (if (url-path? u)
       (let ((path (url-path u)))
-        (if (url-escaped? path 'path) path
-            (url-escape path 'path)))
+        (if (url-encoded? path 'path) path
+            (url-encode path 'path)))
       ""))
 
 (define (url-produce-query u)
