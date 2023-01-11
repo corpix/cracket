@@ -6,7 +6,58 @@
          (only-in srfi/13 string-index)
          (only-in racket/port port->string)
          (for-syntax racket syntax/parse))
-(provide *transport*
+(provide current-transport
+         transport<%>
+         plaintext%
+         tls%
+
+         current-client
+         (struct-out client)
+         new-client
+
+         current-user-agent
+         (struct-out request)
+         new-request
+         (struct-out pool)
+         new-pool
+         current-pool
+         pool-put!
+         pool-get!
+         for/pool
+         make-limited-input-port
+         make-chunked-input-port
+         connection-get!
+         connection-put!
+         connect
+
+         make-headers
+         make-default-headers
+         header-find
+         header-ref
+         header-append
+         header-replace
+         header-remove
+         headers?
+         headers-has
+         headers-merge
+         headers-write
+         headers-read
+         header-encode
+         header-decode
+
+         (struct-out request)
+         new-request
+         encode-method
+         encode-path
+         encode-query
+         request-line-encode
+         request-write
+         decode-status-line
+
+         (struct-out response)
+         new-response
+         response-read
+         make-response-port
          request-send!)
 (module+ test
   (require rackunit))
@@ -18,13 +69,13 @@
 (define (read-until-crlf in)
   (read-line in 'return-linefeed))
 
-(define (marshal-protocol-version protocol-version)
+(define (encode-protocol-version protocol-version)
   (string-append
    protocol-version-prefix
    (string-join (map number->string protocol-version)
                 ".")))
 
-(define (unmarshal-protocol-version protocol-version)
+(define (decode-protocol-version protocol-version)
   (map string->number
        (string-split
         (string-trim protocol-version protocol-version-prefix
@@ -63,13 +114,13 @@
             ((< a b) '<)))))
 
 (module+ test
-  (test-case "marshal-protocol-version"
-    (check-equal? (marshal-protocol-version '(1 2 3 4)) "HTTP/1.2.3.4"))
+  (test-case "encode-protocol-version"
+    (check-equal? (encode-protocol-version '(1 2 3 4)) "HTTP/1.2.3.4"))
 
-  (test-case "unmarshal-protocol-version"
-    (check-equal? (unmarshal-protocol-version "HTTP/1.1")   '(1 1))
-    (check-equal? (unmarshal-protocol-version "HTTP/1.0")   '(1 0))
-    (check-equal? (unmarshal-protocol-version "HTTP/2.1.1") '(2 1 1)))
+  (test-case "decode-protocol-version"
+    (check-equal? (decode-protocol-version "HTTP/1.1")   '(1 1))
+    (check-equal? (decode-protocol-version "HTTP/1.0")   '(1 0))
+    (check-equal? (decode-protocol-version "HTTP/2.1.1") '(2 1 1)))
   (test-case "version-pad"
     (check-equal? (version-pad '()     5) '(0 0 0 0 0))
     (check-equal? (version-pad '(1 2)  5) '(1 2 0 0 0))
@@ -134,6 +185,7 @@
     ;; in the `in` port.
     (values found? pos offset)))
 
+;; FIXME: this should not be a macro (case-lambda is enough)
 (define-syntax (expand-bytes stx)
   (syntax-case stx ()
     ((_ buf)              #'(expand-bytes buf (lambda (b) (* 2 (bytes-length b)))))
@@ -377,7 +429,7 @@
 (define-struct pool (store semaphore) #:prefab)
 (define (new-pool)
   (make-pool (make-hasheq) (make-semaphore 1)))
-(define *pool* (make-parameter (new-pool)))
+(define current-pool (make-parameter (new-pool))) ;; FIXME: use it, atm only literal usage is possible, parameter is unused
 
 (define (pool-get! pool key (default #f))
   (define store (pool-store pool))
@@ -500,7 +552,7 @@
       (let*-values (((in out) (ssl-connect host port 'secure)))
         (connection this host port in out)))))
 
-(define *transport* (make-parameter (new plaintext%)))
+(define current-transport (make-parameter (new plaintext%)))
 
 
 ;;
@@ -589,12 +641,13 @@
   (-> client?)
   (client (new-pool)))
 
-(define *client* (make-parameter (new-client)))
+(define current-client (make-parameter (new-client)))
 
 ;;
 
 (define current-user-agent (make-parameter "corpix-http/1.0"))
 
+;; FIXME: this should not be a macro
 (define-syntax (make-headers stx)
   (syntax-case stx ()
     ((_ (name value) ...)
@@ -625,6 +678,7 @@
         (cddr record)
         default)))
 
+;; FIXME: this should not be a macro
 (define-syntax (header-append stx)
   (syntax-case stx ()
     ((_ headers (name0 value0) (name value) ...)
@@ -633,6 +687,7 @@
                   (v (list value0 value ...)))
          (append hs (list (cons n v)))))))
 
+;; FIXME: this should not be a macro
 (define-syntax (header-replace stx)
   (syntax-case stx ()
     ((_ headers (name0 value0) (name value) ...)
@@ -651,6 +706,7 @@
                 hs
                 (list (cons n v)))))))))
 
+;; FIXME: this should not be a macro
 (define-syntax (header-remove stx)
   (syntax-case stx ()
     ((_ headers name0 name ...)
@@ -665,6 +721,7 @@
 (define (headers? v)
   ((listof (cons/c symbol? string?)) v))
 
+;; FIXME: this should not be a macro
 (define-syntax (headers-has stx)
   (syntax-case stx ()
     ((_ headers (name value))
@@ -678,7 +735,7 @@
 
 (define (headers-write headers (out (current-output-port)))
   (for ((header headers))
-    (write-string (header-marshal header) out)
+    (write-string (header-encode header) out)
     (write-string crlf out)))
 
 (define (headers-read (in (current-input-port)))
@@ -687,15 +744,15 @@
     (if (or (eof-object? v)
             (= (string-length v) 0))
         (reverse acc)
-        (loop (cons (header-unmarshal v)
+        (loop (cons (header-decode v)
                     acc)))))
 
-(define (header-marshal header)
+(define (header-encode header)
   (string-append (symbol->string (car header))
                  ": "
                  (cdr header)))
 
-(define (header-unmarshal header)
+(define (header-decode header)
   (let ((index (string-index header #\:)))
     (when (not index)
       (error "header delimiter was not found"))
@@ -829,12 +886,12 @@
       (check-equal? (headers-read in)
                     (list '(Foo . "bar") '(Baz . "qux")))))
 
-  (test-case "header-unmarshal"
-    (check-equal? (header-unmarshal "Foo: bar")
+  (test-case "header-decode"
+    (check-equal? (header-decode "Foo: bar")
                   '(Foo . "bar"))
-    (check-equal? (header-unmarshal "Foo:bar")
+    (check-equal? (header-decode "Foo:bar")
                   '(Foo . "bar"))
-    (check-equal? (header-unmarshal "Foo  :  bar")
+    (check-equal? (header-decode "Foo  :  bar")
                   '(Foo . "bar"))))
 
 ;;
@@ -844,10 +901,10 @@
   #:prefab)
 
 (define/contract (new-request host port path
-                          #:method  (method 'get)
-                          #:query   (query   #f)
-                          #:headers (headers #f)
-                          #:body    (body    #f))
+                              #:method  (method 'get)
+                              #:query   (query   #f)
+                              #:headers (headers #f)
+                              #:body    (body    #f))
   (->* (string? exact-nonnegative-integer? string?)
        (#:method symbol?
         #:query (listof (cons/c symbol? (or/c false/c string?)))
@@ -869,30 +926,30 @@
                          (open-input-bytes data)))))))
     (make-request host port method path query headers body)))
 
-(define (marshal-method method)
+(define (encode-method method)
   (string-upcase (symbol->string method)))
 
-(define (marshal-path path)
+(define (encode-path path)
   (string-join
    (map uri-encode
         (string-split path "/" #:trim? #f))
    "/"))
 
-(define (marshal-query query)
+(define (encode-query query)
   (alist->form-urlencoded query))
 
-(define (request-line-marshal method path #:query (query #f))
-  (string-append (marshal-method method)
+(define (request-line-encode method path #:query (query #f))
+  (string-append (encode-method method)
                  " "
-                 (marshal-path path)
+                 (encode-path path)
                  (if query
-                     (string-append "?" (marshal-query query) " ")
+                     (string-append "?" (encode-query query) " ")
                      " ")
-                 (marshal-protocol-version protocol-version)))
+                 (encode-protocol-version protocol-version)))
 
 (define (request-write request (out (current-output-port)))
   (write-string
-   (request-line-marshal
+   (request-line-encode
     (request-method request)
     (request-path   request)
     #:query (request-query request))
@@ -904,25 +961,25 @@
     (when body (copy-port body out))))
 
 (module+ test
-  (test-case "marshal-method"
-    (check-equal? (marshal-method 'get) "GET"))
+  (test-case "encode-method"
+    (check-equal? (encode-method 'get) "GET"))
 
-  (test-case "marshal-path"
-    (check-equal? (marshal-path "/foo/bar") "/foo/bar")
-    (check-equal? (marshal-path "/foo/bar baz") "/foo/bar%20baz"))
+  (test-case "encode-path"
+    (check-equal? (encode-path "/foo/bar") "/foo/bar")
+    (check-equal? (encode-path "/foo/bar baz") "/foo/bar%20baz"))
 
-  (test-case "marshal-query"
-    (check-equal? (marshal-query '((lain . "iwakura") (misami . "eiri")))
+  (test-case "encode-query"
+    (check-equal? (encode-query '((lain . "iwakura") (misami . "eiri")))
                   "lain=iwakura&misami=eiri")
-    (check-equal? (marshal-query '((action . "all love lain")))
+    (check-equal? (encode-query '((action . "all love lain")))
                   "action=all+love+lain"))
 
-  (test-case "request-line-marshal"
-    (check-equal? (request-line-marshal 'get  "/foo/bar") "GET /foo/bar HTTP/1.1")
-    (check-equal? (request-line-marshal 'put  "/foo bar") "PUT /foo%20bar HTTP/1.1")
-    (check-equal? (request-line-marshal 'post "/foo bar") "POST /foo%20bar HTTP/1.1")
-    (check-equal? (request-line-marshal 'get  "/foo bar"
-                                        #:query '((baz . "qux") (quax . "and yellow ducks")))
+  (test-case "request-line-encode"
+    (check-equal? (request-line-encode 'get  "/foo/bar") "GET /foo/bar HTTP/1.1")
+    (check-equal? (request-line-encode 'put  "/foo bar") "PUT /foo%20bar HTTP/1.1")
+    (check-equal? (request-line-encode 'post "/foo bar") "POST /foo%20bar HTTP/1.1")
+    (check-equal? (request-line-encode 'get  "/foo bar"
+                                       #:query '((baz . "qux") (quax . "and yellow ducks")))
                   "GET /foo%20bar?baz=qux&quax=and+yellow+ducks HTTP/1.1"))
 
   (test-case "request-write"
@@ -938,10 +995,10 @@
 
 ;;
 
-(define (unmarshal-status-line status)
+(define (decode-status-line status)
   (let ((parts (string-split status " " #:trim? #f)))
     (values
-     (unmarshal-protocol-version (list-ref parts 0)) ;; protocol-version
+     (decode-protocol-version (list-ref parts 0)) ;; protocol-version
      (string->number (list-ref parts 1))             ;; status
      (string-join (drop parts 2) " "))))             ;; status-text
 
@@ -957,7 +1014,7 @@
 
 (define (response-read (in (current-input-port)))
   (let-values (((protocol-version status status-text)
-                (unmarshal-status-line (read-until-crlf in))))
+                (decode-status-line (read-until-crlf in))))
     (new-response protocol-version status status-text
                   (headers-read in)
                   in)))
@@ -978,8 +1035,8 @@
           (else body-reader))))
 
 (define (request-send! req
-                       #:client    (client    (*client*))
-                       #:transport (transport (*transport*)))
+                       #:client    (client    (current-client))
+                       #:transport (transport (current-transport)))
   (let* ((connection (connection-get! (client-pool client)
                                       transport
                                       (request-host req)
@@ -1001,9 +1058,9 @@
        (body-reader (make-response-port client connection req res))))))
 
 (module+ test
-  (test-case "unmarshal-status-line"
+  (test-case "decode-status-line"
     (let-values (((protocol-version status status-text)
-                  (unmarshal-status-line "HTTP/1.1 200 OK")))
+                  (decode-status-line "HTTP/1.1 200 OK")))
       (check-equal? (list protocol-version status status-text)
                     (list '(1 1) 200 "OK"))))
 
