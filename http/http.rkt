@@ -6,62 +6,61 @@
          (only-in srfi/13 string-index)
          (only-in racket/port port->string)
          (for-syntax racket syntax/parse))
-(provide transport<%>
-         plaintext%
-         tls%
+(provide http-transport<%>
+         http-transport-plaintext%
+         http-transport-tls%
 
-         current-transport
-         current-client
-         current-user-agent
-         current-pool
+         current-http-transport
+         current-http-client
+         current-http-user-agent
+         current-http-connection-pool
 
-         (except-out (struct-out client) -make-client)
-         (except-out (struct-out connection) -make-connection)
-         (except-out (struct-out pool) -make-pool)
-         (except-out (struct-out request) -make-request)
-         (except-out (struct-out response) -make-response)
+         (except-out (struct-out http-client) -make-http-client)
+         (except-out (struct-out http-connection) -make-http-connection)
+         (except-out (struct-out http-connection-pool) -make-http-connection-pool)
+         (except-out (struct-out http-request) -make-http-request)
+         (except-out (struct-out http-response) -make-http-response)
 
-         make-client
-         make-pool
+         make-http-client
+         make-http-connection-pool
          make-limited-input-port
          make-chunked-input-port
-         make-headers
-         make-default-headers
-         make-response-port
-         make-request
-         make-response
+         make-http-headers
+         make-default-http-headers
+         make-http-response-port
+         make-http-request
+         make-http-response
 
-         pool-put!
-         pool-get!
-         for/pool
+         http-connection-pool-put!
+         http-connection-pool-get!
+         for/http-connection-pool
 
-         connection-get!
-         connection-put!
-         connect
+         http-connection-get!
+         http-connection-put!
+         http-connect
 
-         header-find
-         header-ref
-         header-append
-         header-replace
-         header-remove
-         headers?
-         headers-has
-         headers-merge
-         headers-write
-         headers-read
-         header-encode
-         header-decode
+         http-header-find
+         http-header-ref
+         http-header-append
+         http-header-replace
+         http-header-remove
+         http-headers?
+         http-headers-has
+         http-headers-merge
+         http-headers-write
+         http-headers-read
+         http-header-encode
+         http-header-decode
 
+         http-encode-method
+         http-encode-path
+         http-encode-query
+         http-request-line-encode
+         http-request-write
+         http-decode-status-line
 
-         encode-method
-         encode-path
-         encode-query
-         request-line-encode
-         request-write
-         decode-status-line
-
-         response-read
-         request-send!)
+         http-response-read
+         http-request-send!)
 (module+ test
   (require rackunit))
 
@@ -429,18 +428,18 @@
 
 ;;
 
-(define-struct pool (store semaphore)
+(define-struct http-connection-pool (store semaphore)
   #:prefab
-  #:constructor-name -make-pool)
-(define (make-pool . values)
-  (-make-pool (make-hash values)
+  #:constructor-name -make-http-connection-pool)
+(define (make-http-connection-pool . values)
+  (-make-http-connection-pool (make-hash values)
               (make-semaphore 1)))
-(define current-pool (make-parameter (make-pool)))
+(define current-http-connection-pool (make-parameter (make-http-connection-pool)))
 
-(define (pool-get! pool key (default #f))
-  (define store (pool-store pool))
+(define (http-connection-pool-get! pool key (default #f))
+  (define store (http-connection-pool-store pool))
   (call-with-semaphore
-   (pool-semaphore pool)
+   (http-connection-pool-semaphore pool)
    (thunk
     (let ((bucket (hash-ref store key #f)))
       (if (and bucket (not (null? bucket)))
@@ -449,32 +448,32 @@
             (car bucket))
           default)))))
 
-(define (pool-put! pool key connection)
-  (define store (pool-store pool))
+(define (http-connection-pool-put! pool key connection)
+  (define store (http-connection-pool-store pool))
   (call-with-semaphore
-   (pool-semaphore pool)
+   (http-connection-pool-semaphore pool)
    (thunk
     (hash-set! store key
                (cons connection
                      (hash-ref store key null))))))
 
 ;; FIXME: eliminate syntax template duplication
-(define-syntax (for/pool stx)
+(define-syntax (for/http-connection-pool stx)
   (syntax-case stx ()
     ((_ (((k v) pool)) body0 body ...)
      #'(let* ((p pool)
-              (s (pool-store p)))
+              (s (http-connection-pool-store p)))
          (call-with-semaphore
-          (pool-semaphore p)
+          (http-connection-pool-semaphore p)
           (thunk
            (for ((k (in-list (hash-keys s))))
              (for ((v (in-list (hash-ref s k))))
                body0 body ...))))))
     ((_ ((v pool)) body0 body ...)
      #'(let* ((p pool)
-              (s (pool-store p)))
+              (s (http-connection-pool-store p)))
          (call-with-semaphore
-          (pool-semaphore p)
+          (http-connection-pool-semaphore p)
           (thunk
            (for ((k (in-list (hash-keys s))))
              (for ((v (in-list (hash-ref s k))))
@@ -482,50 +481,50 @@
 
 (module+ test
   (test-case "pool-get!"
-    (let ((pool (make-pool)))
-      (check-equal? (pool-get! pool 1) #f)
-      (check-equal? (pool-get! pool 1 #f) #f))
-    (let ((pool (make-pool)))
-      (pool-put! pool 1 #t)
-      (check-equal? (pool-get! pool 1) #t)
-      (check-equal? (pool-get! pool 1 #f) #f)))
+    (let ((pool (make-http-connection-pool)))
+      (check-equal? (http-connection-pool-get! pool 1) #f)
+      (check-equal? (http-connection-pool-get! pool 1 #f) #f))
+    (let ((pool (make-http-connection-pool)))
+      (http-connection-pool-put! pool 1 #t)
+      (check-equal? (http-connection-pool-get! pool 1) #t)
+      (check-equal? (http-connection-pool-get! pool 1 #f) #f)))
 
   (test-case "pool-put!"
-    (let ((pool (make-pool)))
-      (pool-put! pool 1 2)
-      (check-equal? (pool-store pool)
+    (let ((pool (make-http-connection-pool)))
+      (http-connection-pool-put! pool 1 2)
+      (check-equal? (http-connection-pool-store pool)
                     (make-hash '((1 2))))
-      (pool-put! pool 3 4)
-      (check-equal? (pool-store pool)
+      (http-connection-pool-put! pool 3 4)
+      (check-equal? (http-connection-pool-store pool)
                     (make-hash '((1 2) (3 4))))
-      (pool-put! pool 1 9)
-      (check-equal? (pool-store pool)
+      (http-connection-pool-put! pool 1 9)
+      (check-equal? (http-connection-pool-store pool)
                     (make-hash '((1 9 2) (3 4))))
-      (pool-put! pool 1 10)
-      (check-equal? (pool-store pool)
+      (http-connection-pool-put! pool 1 10)
+      (check-equal? (http-connection-pool-store pool)
                     (make-hash '((1 10 9 2) (3 4))))))
 
   (test-case "for/pool"
     (let ((acc null))
-      (for/pool ((v (make-pool)))
+      (for/http-connection-pool ((v (make-http-connection-pool)))
         (set! acc (cons v acc)))
       (check-equal? acc null))
     (let ((acc null)
-          (pool (make-pool)))
+          (pool (make-http-connection-pool)))
       (for ((n (reverse '(1 2 3 4))))
-        (pool-put! pool 'first n))
+        (http-connection-pool-put! pool 'first n))
       (for ((n (reverse '(5 6 7 8))))
-        (pool-put! pool 'second n))
-      (for/pool ((v pool))
+        (http-connection-pool-put! pool 'second n))
+      (for/http-connection-pool ((v pool))
         (set! acc (cons v acc)))
       (check-equal? (sort acc >) '(8 7 6 5 4 3 2 1)))
     (let ((acc null)
-          (pool (make-pool)))
+          (pool (make-http-connection-pool)))
       (for ((n (reverse '(1 2 3 4))))
-        (pool-put! pool 'first n))
+        (http-connection-pool-put! pool 'first n))
       (for ((n (reverse '(5 6 7 8))))
-        (pool-put! pool 'second n))
-      (for/pool (((k v) pool))
+        (http-connection-pool-put! pool 'second n))
+      (for/http-connection-pool (((k v) pool))
         (set! acc (cons (list k v) acc)))
       (check-equal? (sort acc (lambda (l r) (> (cadr l)
                                                (cadr r))))
@@ -540,63 +539,63 @@
 
 ;;
 
-(define-struct connection
+(define-struct http-connection
   (transport host port in out)
   #:prefab
-  #:constructor-name -make-connection)
+  #:constructor-name -make-http-connection)
 
-(define transport<%> (interface () get-name connect))
+(define http-transport<%> (interface () get-name connect))
 
-(define plaintext%
-  (class* object% (transport<%>)
+(define http-transport-plaintext%
+  (class* object% (http-transport<%>)
     (super-new)
     (define/public (get-name) 'plaintext)
     (define/public (connect host port)
       (tcp-connect host port))))
 
-(define tls%
-  (class* object% (transport<%>)
+(define http-transport-tls%
+  (class* object% (http-transport<%>)
     (super-new)
     (define/public (get-name) 'tls)
     (define/public (connect host port)
       (ssl-connect host port 'secure))))
 
-(define current-transport (make-parameter (new plaintext%)))
+(define current-http-transport (make-parameter (new http-transport-plaintext%)))
 
-(define (connect host port
-                 #:transport (transport (current-transport)))
+(define (http-connect host port
+                 #:transport (transport (current-http-transport)))
   (let-values (((in out) (send transport connect host port)))
-    (-make-connection transport
+    (-make-http-connection transport
                       host port
                       in out)))
 
 (define (make-connection-key host port
-                             #:transport (transport (current-transport)))
+                             #:transport (transport (current-http-transport)))
   (format "~a-~a-~a"
           (send transport get-name)
           host port))
 
-(define (connection-get! host port
-                         #:pool (pool (current-pool))
-                         #:transport (transport (current-transport)))
+(define (http-connection-get! host port
+                         #:pool (pool (current-http-connection-pool))
+                         #:transport (transport (current-http-transport)))
   (or (let* ((key (make-connection-key host port #:transport transport))
-             (connection (pool-get! pool key)))
+             (connection (http-connection-pool-get! pool key)))
         (and connection
-             (match (sync/timeout 0 (peek-bytes-evt 1 0 #f (connection-in connection)))
+             (match (sync/timeout 0 (peek-bytes-evt 1 0 #f (http-connection-in connection)))
                ((? eof-object?) #f) ;; connection timeout or closed
                (_ connection))))
-      (connect host port #:transport transport)))
+      (http-connect host port #:transport transport)))
 
-(define (connection-put! connection #:pool (pool (current-pool)))
-  (pool-put! pool
-             (make-connection-key (connection-host connection)
-                                  (connection-port connection)
-                                  #:transport (connection-transport connection))
+(define (http-connection-put! connection #:pool (pool (current-http-connection-pool)))
+  (http-connection-pool-put! pool
+             (make-connection-key (http-connection-host connection)
+                                  (http-connection-port connection)
+                                  #:transport (http-connection-transport connection))
              connection))
 
 (module+ test
   (define test-transport%
-    (class* object% (transport<%>)
+    (class* object% (http-transport<%>)
       (super-new)
       (define/public (get-name) 'test)
       (define/public (connect host port)
@@ -613,76 +612,76 @@
 
   (test-case "connection-get!"
     (let ((transport (new test-transport%))
-          (pool      (make-pool)))
-      (check-true (connection? (connection-get! "example.com" 666
+          (pool      (make-http-connection-pool)))
+      (check-true (http-connection? (http-connection-get! "example.com" 666
                                                 #:pool pool
                                                 #:transport transport))))
     (let* ((transport  (new test-transport%))
-           (connection (connect "example.com" 666 #:transport transport))
+           (connection (http-connect "example.com" 666 #:transport transport))
            (key        (make-connection-key "example.com" 666
                                             #:transport transport))
-           (pool       (make-pool)))
-      (pool-put! pool key connection)
-      (let ((connection-from-pool (connection-get! "example.com" 666
+           (pool       (make-http-connection-pool)))
+      (http-connection-pool-put! pool key connection)
+      (let ((connection-from-pool (http-connection-get! "example.com" 666
                                                    #:pool pool
                                                    #:transport transport)))
-        (check-eq? (connection-transport connection-from-pool) transport)
-        (check-eq? (connection-in connection-from-pool) (connection-in connection))
-        (check-eq? (connection-out connection-from-pool) (connection-out connection)))
-      (let ((connection-from-pool (connection-get! "example.com" 666
+        (check-eq? (http-connection-transport connection-from-pool) transport)
+        (check-eq? (http-connection-in connection-from-pool) (http-connection-in connection))
+        (check-eq? (http-connection-out connection-from-pool) (http-connection-out connection)))
+      (let ((connection-from-pool (http-connection-get! "example.com" 666
                                                    #:pool pool
                                                    #:transport transport)))
         (check-not-eq? connection-from-pool connection)
-        (check-eq? (connection-transport connection-from-pool) transport))))
+        (check-eq? (http-connection-transport connection-from-pool) transport))))
 
   (test-case "connection-put!"
     (let* ((transport  (new test-transport%))
-           (connection (connect "example.com" 666 #:transport transport))
-           (pool       (make-pool)))
-      (connection-put! connection
+           (connection (http-connect "example.com" 666 #:transport transport))
+           (pool       (make-http-connection-pool)))
+      (http-connection-put! connection
                        #:pool pool)
-      (let ((connection-from-pool (connection-get! "example.com" 666
+      (let ((connection-from-pool (http-connection-get! "example.com" 666
                                                    #:pool pool
                                                    #:transport transport)))
-        (check-eq? (connection-transport connection-from-pool) transport)
-        (check-eq? (connection-in connection-from-pool) (connection-in connection))
-        (check-eq? (connection-out connection-from-pool) (connection-out connection)))
-      (let ((connection-from-pool (connection-get! "example.com" 666
+        (check-eq? (http-connection-transport connection-from-pool) transport)
+        (check-eq? (http-connection-in connection-from-pool) (http-connection-in connection))
+        (check-eq? (http-connection-out connection-from-pool) (http-connection-out connection)))
+      (let ((connection-from-pool (http-connection-get! "example.com" 666
                                                    #:pool pool
                                                    #:transport transport)))
         (check-not-eq? connection connection-from-pool)
-        (check-eq? (connection-transport connection-from-pool) transport)))))
+        (check-eq? (http-connection-transport connection-from-pool) transport)))))
 
 ;;
 
-(define-struct client
+(define-struct http-client
   (pool)
   #:prefab
-  #:constructor-name -make-client)
+  #:constructor-name -make-http-client)
 
-(define/contract (make-client (pool (current-pool)))
-  (-> client?)
-  (-make-client pool))
+(define/contract (make-http-client (pool (current-http-connection-pool)))
+  (-> http-client?)
+  (-make-http-client pool))
 
-(define current-client (make-parameter (make-client)))
+(define current-http-client (make-parameter (make-http-client)))
 
 ;;
 
-(define current-user-agent (make-parameter "corpix-http/1.0"))
+(define current-http-user-agent (make-parameter "corpix-http/1.0"))
 
 ;; FIXME: this should not be a macro
-(define-syntax (make-headers stx)
+(define-syntax (make-http-headers stx)
   (syntax-case stx ()
     ((_ (name value) ...)
      #'(list (cons name  value) ...))))
 
-(define (make-default-headers host)
-  (make-headers ('Host host)
-                ('User-Agent (current-user-agent))
+(define (make-default-http-headers host)
+  (make-http-headers ('Host host)
+                ('User-Agent (current-http-user-agent))
                 ('Accept "*/*")
                 ('Connection "close")))
 
-(define (header-find headers name (default #f))
+(define (http-header-find headers name (default #f))
   (let ((name (if (symbol? name)
                   (symbol->string name)
                   name))
@@ -695,14 +694,14 @@
                 (cons i header)
                 (loop (add1 i))))))))
 
-(define (header-ref headers name (default #f))
-  (let ((record (header-find headers name)))
+(define (http-header-ref headers name (default #f))
+  (let ((record (http-header-find headers name)))
     (if record
         (cddr record)
         default)))
 
 ;; FIXME: this should not be a macro
-(define-syntax (header-append stx)
+(define-syntax (http-header-append stx)
   (syntax-case stx ()
     ((_ headers (name0 value0) (name value) ...)
      #'(for/fold ((hs headers))
@@ -711,13 +710,13 @@
          (append hs (list (cons n v)))))))
 
 ;; FIXME: this should not be a macro
-(define-syntax (header-replace stx)
+(define-syntax (http-header-replace stx)
   (syntax-case stx ()
     ((_ headers (name0 value0) (name value) ...)
      #'(for/fold ((hs headers))
                  ((n (list name0  name ...))
                   (v (list value0 value ...)))
-         (let ((record (header-find hs n)))
+         (let ((record (http-header-find hs n)))
            (if record
                (let-values (((left right)
                              (split-at hs (car record))))
@@ -730,52 +729,52 @@
                 (list (cons n v)))))))))
 
 ;; FIXME: this should not be a macro
-(define-syntax (header-remove stx)
+(define-syntax (http-header-remove stx)
   (syntax-case stx ()
     ((_ headers name0 name ...)
      #'(for/fold ((hs headers))
                  ((n (list name0 name ...)))
-         (let ((record (header-find hs n)))
+         (let ((record (http-header-find hs n)))
            (if record
                (let-values (((left right) (split-at hs (car record))))
                  (append left (drop right 1)))
                hs))))))
 
-(define (headers? v)
+(define (http-headers? v)
   ((listof (cons/c symbol? string?)) v))
 
 ;; FIXME: this should not be a macro
-(define-syntax (headers-has stx)
+(define-syntax (http-headers-has stx)
   (syntax-case stx ()
     ((_ headers (name value))
-     #'(let ((v (header-ref headers name #f)))
+     #'(let ((v (http-header-ref headers name #f)))
          (and v (equal? v value))))))
 
-(define (headers-merge original update)
+(define (http-headers-merge original update)
   (for/fold ((hs original))
             ((h (in-list update)))
-    (header-replace hs ((car h) (cdr h)))))
+    (http-header-replace hs ((car h) (cdr h)))))
 
-(define (headers-write headers (out (current-output-port)))
+(define (http-headers-write headers (out (current-output-port)))
   (for ((header headers))
-    (write-string (header-encode header) out)
+    (write-string (http-header-encode header) out)
     (write-string crlf out)))
 
-(define (headers-read (in (current-input-port)))
+(define (http-headers-read (in (current-input-port)))
   (let loop ((acc null))
     (define v (read-until-crlf in))
     (if (or (eof-object? v)
             (= (string-length v) 0))
         (reverse acc)
-        (loop (cons (header-decode v)
+        (loop (cons (http-header-decode v)
                     acc)))))
 
-(define (header-encode header)
+(define (http-header-encode header)
   (string-append (symbol->string (car header))
                  ": "
                  (cdr header)))
 
-(define (header-decode header)
+(define (http-header-decode header)
   (let ((index (string-index header #\:)))
     (when (not index)
       (error "header delimiter was not found"))
@@ -785,109 +784,109 @@
 
 (module+ test
   (test-case "make-headers"
-    (check-equal? (make-headers ('foo "bar") ('baz "qux"))
+    (check-equal? (make-http-headers ('foo "bar") ('baz "qux"))
                   (list (cons 'foo "bar")
                         (cons 'baz "qux"))))
 
   (test-case "make-default-headers"
     (check-true ((listof (cons/c symbol? string?))
-                 (make-default-headers "example.com")))
-    (check-equal? (assoc 'Host (make-default-headers "example.com"))
+                 (make-default-http-headers "example.com")))
+    (check-equal? (assoc 'Host (make-default-http-headers "example.com"))
                   '(Host . "example.com")))
 
   (test-case "header-find"
-    (check-equal? (header-find (make-headers ('Host "example.com"))
+    (check-equal? (http-header-find (make-http-headers ('Host "example.com"))
                                'host)
                   '(0 Host . "example.com"))
-    (check-equal? (header-find (make-headers ('Connection "keep-alive"))
+    (check-equal? (http-header-find (make-http-headers ('Connection "keep-alive"))
                                'Connection)
                   '(0 Connection . "keep-alive"))
-    (check-equal? (header-find (make-headers ('Host  "example.com")
+    (check-equal? (http-header-find (make-http-headers ('Host  "example.com")
                                              ('Connection "keep-alive"))
                                'Connection)
                   '(1 Connection . "keep-alive"))
-    (check-equal? (header-find (make-headers ('Host "example.com")
+    (check-equal? (http-header-find (make-http-headers ('Host "example.com")
                                              ('Connection "keep-alive")
                                              ('Connection "close"))
                                'Connection)
                   '(1 Connection . "keep-alive"))
 
-    (check-equal? (header-find (make-headers ('Host "example.com")) 'f) #f)
-    (check-equal? (header-find (make-headers) 'f) #f)
-    (check-equal? (header-find (make-headers) 'f (void)) (void)))
+    (check-equal? (http-header-find (make-http-headers ('Host "example.com")) 'f) #f)
+    (check-equal? (http-header-find (make-http-headers) 'f) #f)
+    (check-equal? (http-header-find (make-http-headers) 'f (void)) (void)))
 
   (test-case "header-ref"
-    (check-equal? (header-ref (list '(Connection . "keep-alive")) 'Connection)
+    (check-equal? (http-header-ref (list '(Connection . "keep-alive")) 'Connection)
                   "keep-alive"))
 
   (test-case "header-append"
-    (check-equal? (header-append (make-headers ('Connection "keep-alive"))
+    (check-equal? (http-header-append (make-http-headers ('Connection "keep-alive"))
                                  ('Cache-Control "no-cache"))
-                  (make-headers ('Connection "keep-alive")
+                  (make-http-headers ('Connection "keep-alive")
                                 ('Cache-Control "no-cache")))
-    (check-equal? (header-append (make-headers ('Connection "keep-alive"))
+    (check-equal? (http-header-append (make-http-headers ('Connection "keep-alive"))
                                  ('Cache-Control "no-cache")
                                  ('Content-Type "text/html"))
-                  (make-headers ('Connection "keep-alive")
+                  (make-http-headers ('Connection "keep-alive")
                                 ('Cache-Control "no-cache")
                                 ('Content-Type "text/html"))))
 
   (test-case "header-replace"
-    (check-equal? (header-replace (make-headers ('Connection "keep-alive"))
+    (check-equal? (http-header-replace (make-http-headers ('Connection "keep-alive"))
                                   ('Connection "close"))
-                  (make-headers ('Connection "close")))
-    (check-equal? (header-replace (make-headers)
+                  (make-http-headers ('Connection "close")))
+    (check-equal? (http-header-replace (make-http-headers)
                                   ('Host "example.com"))
-                  (make-headers ('Host "example.com")))
-    (check-equal? (header-replace (list)
+                  (make-http-headers ('Host "example.com")))
+    (check-equal? (http-header-replace (list)
                                   ('Connection "close")
                                   ('Connection "keep-alive"))
                   (list '(Connection . "keep-alive"))))
 
   (test-case "header-remove"
-    (check-equal? (header-remove (make-headers ('Connection "keep-alive"))
+    (check-equal? (http-header-remove (make-http-headers ('Connection "keep-alive"))
                                  'Connection)
-                  (make-headers))
-    (check-equal? (header-remove (make-headers ('Connection "keep-alive")
+                  (make-http-headers))
+    (check-equal? (http-header-remove (make-http-headers ('Connection "keep-alive")
                                                ('Connection "close"))
                                  'Connection)
-                  (make-headers ('Connection "close"))) ;; XXX: shifts one item at a time
-    (check-equal? (header-remove (make-headers ('Connection "keep-alive")
+                  (make-http-headers ('Connection "close"))) ;; XXX: shifts one item at a time
+    (check-equal? (http-header-remove (make-http-headers ('Connection "keep-alive")
                                                ('Cache-Control "no-cache"))
                                  'Connection)
-                  (make-headers ('Cache-Control "no-cache")))
-    (check-equal? (header-remove (make-headers ('Connection "keep-alive")
+                  (make-http-headers ('Cache-Control "no-cache")))
+    (check-equal? (http-header-remove (make-http-headers ('Connection "keep-alive")
                                                ('Cache-Control "no-cache"))
                                  'Connection
                                  'Cache-Control)
-                  (make-headers)))
+                  (make-http-headers)))
 
   (test-case "headers-has"
-    (check-equal? (headers-has (make-headers ('Foo "bar")) ('Foo "bar"))
+    (check-equal? (http-headers-has (make-http-headers ('Foo "bar")) ('Foo "bar"))
                   #t)
-    (check-equal? (headers-has (make-headers ('Foo "bar")) ('Bar "baz"))
+    (check-equal? (http-headers-has (make-http-headers ('Foo "bar")) ('Bar "baz"))
                   #f))
 
   (test-case "headers-merge"
-    (check-equal? (headers-merge '()
+    (check-equal? (http-headers-merge '()
                                  '((Hello . "me") (Bar . "baz")))
                   '((Hello . "me") (Bar . "baz")))
-    (check-equal? (headers-merge '((Hello . "you") (Foo . "bar"))
+    (check-equal? (http-headers-merge '((Hello . "you") (Foo . "bar"))
                                  '((Hello . "me") (Bar . "baz")))
                   '((Hello . "me") (Foo . "bar") (Bar . "baz")))
-    (check-equal? (headers-merge '((hello . "you"))
+    (check-equal? (http-headers-merge '((hello . "you"))
                                  '((Hello . "me") (Bar . "baz")))
                   '((Hello . "me") (Bar . "baz"))))
 
   (test-case "headers-write"
     (let ((out (open-output-string)))
       (check-equal? (begin
-                      (headers-write '((Host . "localhost")) out)
+                      (http-headers-write '((Host . "localhost")) out)
                       (get-output-string out))
                     "Host: localhost\r\n"))
     (let ((out (open-output-string)))
       (check-equal? (begin
-                      (headers-write '((Host . "localhost")
+                      (http-headers-write '((Host . "localhost")
                                        (User-Agent . "test"))
                                      out)
                       (get-output-string out))
@@ -895,7 +894,7 @@
 
     (let ((out (open-output-string)))
       (check-equal? (begin
-                      (headers-write '((Set-Cookie . "name1=value; HttpOnly")
+                      (http-headers-write '((Set-Cookie . "name1=value; HttpOnly")
                                        (Set-Cookie . "name2=value; HttpOnly"))
                                      out)
                       (get-output-string out))
@@ -903,28 +902,28 @@
 
   (test-case "headers-read"
     (let ((in (open-input-string "Foo: bar\r\nBaz: qux")))
-      (check-equal? (headers-read in)
+      (check-equal? (http-headers-read in)
                     (list '(Foo . "bar") '(Baz . "qux"))))
     (let ((in (open-input-string "Foo: bar\r\nBaz: qux\r\n\r\n")))
-      (check-equal? (headers-read in)
+      (check-equal? (http-headers-read in)
                     (list '(Foo . "bar") '(Baz . "qux")))))
 
   (test-case "header-decode"
-    (check-equal? (header-decode "Foo: bar")
+    (check-equal? (http-header-decode "Foo: bar")
                   '(Foo . "bar"))
-    (check-equal? (header-decode "Foo:bar")
+    (check-equal? (http-header-decode "Foo:bar")
                   '(Foo . "bar"))
-    (check-equal? (header-decode "Foo  :  bar")
+    (check-equal? (http-header-decode "Foo  :  bar")
                   '(Foo . "bar"))))
 
 ;;
 
-(define-struct request
+(define-struct http-request
   (host port method path query headers body)
   #:prefab
-  #:constructor-name -make-request)
+  #:constructor-name -make-http-request)
 
-(define/contract (make-request host port path
+(define/contract (make-http-request host port path
                               #:method (method 'get)
                               #:query (query #f)
                               #:headers (headers #f)
@@ -934,77 +933,77 @@
         #:query (listof (cons/c symbol? (or/c false/c string?)))
         #:headers (listof (or/c false/c (cons/c symbol? string?)))
         #:body (or/c false/c string? bytes? input-port?))
-       request?)
+       http-request?)
   (let* ((headers (if (not headers)
-                      (make-default-headers host)
-                      (headers-merge (make-default-headers host) headers)))
+                      (make-default-http-headers host)
+                      (http-headers-merge (make-default-http-headers host) headers)))
          (body (and body
-                    (match (header-ref headers 'Content-Type)
+                    (match (http-header-ref headers 'Content-Type)
                       ("application/x-www-form-urlencoded"
                        (let ((data
                               (cond
                                 ((input-port? body) (port->bytes body))
                                 ((string? body) (string->bytes/utf-8 body))
                                 ((bytes? body) body))))
-                         (set! headers (header-replace
+                         (set! headers (http-header-replace
                                         headers
                                         ('Content-Length (number->string (bytes-length data)))))
                          (open-input-bytes data)))))))
-    (-make-request host port method path query headers body)))
+    (-make-http-request host port method path query headers body)))
 
-(define (encode-method method)
+(define (http-encode-method method)
   (string-upcase (symbol->string method)))
 
-(define (encode-path path)
+(define (http-encode-path path)
   (string-join
    (map uri-encode
         (string-split path "/" #:trim? #f))
    "/"))
 
-(define (encode-query query)
+(define (http-encode-query query)
   (alist->form-urlencoded query))
 
-(define (request-line-encode method path #:query (query #f))
-  (string-append (encode-method method)
+(define (http-request-line-encode method path #:query (query #f))
+  (string-append (http-encode-method method)
                  " "
-                 (encode-path path)
+                 (http-encode-path path)
                  (if query
-                     (string-append "?" (encode-query query) " ")
+                     (string-append "?" (http-encode-query query) " ")
                      " ")
                  (encode-protocol-version protocol-version)))
 
-(define (request-write request (out (current-output-port)))
+(define (http-request-write request (out (current-output-port)))
   (write-string
-   (request-line-encode
-    (request-method request)
-    (request-path   request)
-    #:query (request-query request))
+   (http-request-line-encode
+    (http-request-method request)
+    (http-request-path   request)
+    #:query (http-request-query request))
    out)
   (write-string crlf out)
-  (headers-write (request-headers request) out)
+  (http-headers-write (http-request-headers request) out)
   (write-string crlf out)
-  (let ((body (request-body request)))
+  (let ((body (http-request-body request)))
     (when body (copy-port body out))))
 
 (module+ test
   (test-case "encode-method"
-    (check-equal? (encode-method 'get) "GET"))
+    (check-equal? (http-encode-method 'get) "GET"))
 
   (test-case "encode-path"
-    (check-equal? (encode-path "/foo/bar") "/foo/bar")
-    (check-equal? (encode-path "/foo/bar baz") "/foo/bar%20baz"))
+    (check-equal? (http-encode-path "/foo/bar") "/foo/bar")
+    (check-equal? (http-encode-path "/foo/bar baz") "/foo/bar%20baz"))
 
   (test-case "encode-query"
-    (check-equal? (encode-query '((lain . "iwakura") (misami . "eiri")))
+    (check-equal? (http-encode-query '((lain . "iwakura") (misami . "eiri")))
                   "lain=iwakura&misami=eiri")
-    (check-equal? (encode-query '((action . "all love lain")))
+    (check-equal? (http-encode-query '((action . "all love lain")))
                   "action=all+love+lain"))
 
   (test-case "request-line-encode"
-    (check-equal? (request-line-encode 'get  "/foo/bar") "GET /foo/bar HTTP/1.1")
-    (check-equal? (request-line-encode 'put  "/foo bar") "PUT /foo%20bar HTTP/1.1")
-    (check-equal? (request-line-encode 'post "/foo bar") "POST /foo%20bar HTTP/1.1")
-    (check-equal? (request-line-encode 'get  "/foo bar"
+    (check-equal? (http-request-line-encode 'get  "/foo/bar") "GET /foo/bar HTTP/1.1")
+    (check-equal? (http-request-line-encode 'put  "/foo bar") "PUT /foo%20bar HTTP/1.1")
+    (check-equal? (http-request-line-encode 'post "/foo bar") "POST /foo%20bar HTTP/1.1")
+    (check-equal? (http-request-line-encode 'get  "/foo bar"
                                        #:query '((baz . "qux") (quax . "and yellow ducks")))
                   "GET /foo%20bar?baz=qux&quax=and+yellow+ducks HTTP/1.1"))
 
@@ -1012,7 +1011,7 @@
     (let ((out (open-output-string)))
       (check-equal?
        (begin
-         (request-write (make-request "127.0.0.1" 8080 "/hello you"
+         (http-request-write (make-http-request "127.0.0.1" 8080 "/hello you"
                                      #:query '((foo . "bar"))
                                      #:headers '((Host . "example.com")))
                         out)
@@ -1021,82 +1020,82 @@
 
 ;;
 
-(define (decode-status-line status)
+(define (http-decode-status-line status)
   (let ((parts (string-split status " " #:trim? #f)))
     (values
      (decode-protocol-version (list-ref parts 0)) ;; protocol-version
      (string->number (list-ref parts 1))             ;; status
      (string-join (drop parts 2) " "))))             ;; status-text
 
-(define-struct response
+(define-struct http-response
   (protocol-version status status-text headers body-reader)
   #:prefab
-  #:constructor-name -make-response)
+  #:constructor-name -make-http-response)
 
-(define/contract (make-response protocol-version status status-text headers body-reader)
+(define/contract (make-http-response protocol-version status status-text headers body-reader)
   (-> (listof exact-nonnegative-integer?) integer? string?
-      headers?
+      http-headers?
       input-port?
-      response?)
-  (-make-response protocol-version status status-text headers body-reader))
+      http-response?)
+  (-make-http-response protocol-version status status-text headers body-reader))
 
-(define (response-read (in (current-input-port)))
+(define (http-response-read (in (current-input-port)))
   (let-values (((protocol-version status status-text)
-                (decode-status-line (read-until-crlf in))))
-    (make-response protocol-version status status-text
-                   (headers-read in)
+                (http-decode-status-line (read-until-crlf in))))
+    (make-http-response protocol-version status status-text
+                   (http-headers-read in)
                    in)))
 
-(define (make-response-port client connection request response)
-  (let* ((headers (response-headers response))
-         (keep-alive? (headers-has (request-headers request) ('Connection "keep-alive")))
-         (body-reader (response-body-reader response))
-         (content-length (string->number (header-ref headers 'Content-Length "")))
+(define (make-http-response-port client connection request response)
+  (let* ((headers (http-response-headers response))
+         (keep-alive? (http-headers-has (http-request-headers request) ('Connection "keep-alive")))
+         (body-reader (http-response-body-reader response))
+         (content-length (string->number (http-header-ref headers 'Content-Length "")))
          (free (lambda (port)
                  (if keep-alive?
-                     (connection-put! connection
-                                      #:pool (client-pool client))
+                     (http-connection-put! connection
+                                      #:pool (http-client-pool client))
                      (close-input-port port)))))
     (cond ((exact-nonnegative-integer? content-length)
            (make-limited-input-port body-reader content-length #:on-close free))
-          ((headers-has headers ('Transfer-Encoding "chunked"))
+          ((http-headers-has headers ('Transfer-Encoding "chunked"))
            (make-chunked-input-port body-reader #:on-close free))
           (else body-reader))))
 
-(define (request-send! req
-                       #:client    (client    (current-client))
-                       #:transport (transport (current-transport)))
-  (let* ((connection (connection-get! (request-host req)
-                                      (request-port req)
-                                      #:pool (client-pool client)
+(define (http-request-send! req
+                       #:client    (client    (current-http-client))
+                       #:transport (transport (current-http-transport)))
+  (let* ((connection (http-connection-get! (http-request-host req)
+                                      (http-request-port req)
+                                      #:pool (http-client-pool client)
                                       #:transport transport)))
-    (let ((out (connection-out connection)))
-      (request-write req out)
+    (let ((out (http-connection-out connection)))
+      (http-request-write req out)
       (flush-output out))
-    (let ((res (response-read (connection-in connection))))
+    (let ((res (http-response-read (http-connection-in connection))))
       (when (not (eq?
-                  (version-compare (response-protocol-version res)
+                  (version-compare (http-response-protocol-version res)
                                    protocol-version
                                    #:parts 'major)
                   '=))
         (error (format "want ~a version, got ~a"
                        protocol-version
-                       (response-protocol-version res))))
+                       (http-response-protocol-version res))))
       (struct-copy
-       response res
-       (body-reader (make-response-port client connection req res))))))
+       http-response res
+       (body-reader (make-http-response-port client connection req res))))))
 
 (module+ test
   (test-case "decode-status-line"
     (let-values (((protocol-version status status-text)
-                  (decode-status-line "HTTP/1.1 200 OK")))
+                  (http-decode-status-line "HTTP/1.1 200 OK")))
       (check-equal? (list protocol-version status status-text)
                     (list '(1 1) 200 "OK"))))
 
   (test-case "response-read"
     (let* ((in (open-input-string "HTTP/1.1 200 This is fine\r\nFoo: bar\r\n\r\nhello"))
-           (response (response-read in)))
+           (response (http-response-read in)))
       (check-equal? response
-                    (make-response '(1 1) 200 "This is fine"
-                                   (make-headers ('Foo "bar")) in))
+                    (make-http-response '(1 1) 200 "This is fine"
+                                   (make-http-headers ('Foo "bar")) in))
       (check-equal? (port->string in) "hello"))))
