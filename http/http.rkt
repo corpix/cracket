@@ -6,32 +6,39 @@
          (only-in srfi/13 string-index)
          (only-in racket/port port->string)
          (for-syntax racket syntax/parse))
-(provide current-transport
-         transport<%>
+(provide transport<%>
          plaintext%
          tls%
 
+         current-transport
          current-client
-         (struct-out client)
-         new-client
-
          current-user-agent
-         (struct-out request)
-         new-request
-         (struct-out pool)
-         new-pool
          current-pool
+
+         (except-out (struct-out client) -make-client)
+         (except-out (struct-out connection) -make-connection)
+         (except-out (struct-out pool) -make-pool)
+         (except-out (struct-out request) -make-request)
+         (except-out (struct-out response) -make-response)
+
+         make-client
+         make-pool
+         make-limited-input-port
+         make-chunked-input-port
+         make-headers
+         make-default-headers
+         make-response-port
+         make-request
+         make-response
+
          pool-put!
          pool-get!
          for/pool
-         make-limited-input-port
-         make-chunked-input-port
+
          connection-get!
          connection-put!
          connect
 
-         make-headers
-         make-default-headers
          header-find
          header-ref
          header-append
@@ -45,8 +52,7 @@
          header-encode
          header-decode
 
-         (struct-out request)
-         new-request
+
          encode-method
          encode-path
          encode-query
@@ -54,10 +60,7 @@
          request-write
          decode-status-line
 
-         (struct-out response)
-         new-response
          response-read
-         make-response-port
          request-send!)
 (module+ test
   (require rackunit))
@@ -426,10 +429,13 @@
 
 ;;
 
-(define-struct pool (store semaphore) #:prefab)
-(define (new-pool)
-  (make-pool (make-hasheq) (make-semaphore 1)))
-(define current-pool (make-parameter (new-pool))) ;; FIXME: use it, atm only literal usage is possible, parameter is unused
+(define-struct pool (store semaphore)
+  #:prefab
+  #:constructor-name -make-pool)
+(define (make-pool . values)
+  (-make-pool (make-hash values)
+              (make-semaphore 1)))
+(define current-pool (make-parameter (make-pool)))
 
 (define (pool-get! pool key (default #f))
   (define store (pool-store pool))
@@ -476,36 +482,36 @@
 
 (module+ test
   (test-case "pool-get!"
-    (let ((pool (new-pool)))
+    (let ((pool (make-pool)))
       (check-equal? (pool-get! pool 1) #f)
       (check-equal? (pool-get! pool 1 #f) #f))
-    (let ((pool (new-pool)))
+    (let ((pool (make-pool)))
       (pool-put! pool 1 #t)
       (check-equal? (pool-get! pool 1) #t)
       (check-equal? (pool-get! pool 1 #f) #f)))
 
   (test-case "pool-put!"
-    (let ((pool (new-pool)))
+    (let ((pool (make-pool)))
       (pool-put! pool 1 2)
       (check-equal? (pool-store pool)
-                    (make-hasheq '((1 . (2)))))
+                    (make-hash '((1 2))))
       (pool-put! pool 3 4)
       (check-equal? (pool-store pool)
-                    (make-hasheq '((1 . (2)) (3 . (4)))))
+                    (make-hash '((1 2) (3 4))))
       (pool-put! pool 1 9)
       (check-equal? (pool-store pool)
-                    (make-hasheq '((1 . (9 2)) (3 . (4)))))
+                    (make-hash '((1 9 2) (3 4))))
       (pool-put! pool 1 10)
       (check-equal? (pool-store pool)
-                    (make-hasheq '((1 . (10 9 2)) (3 . (4)))))))
+                    (make-hash '((1 10 9 2) (3 4))))))
 
   (test-case "for/pool"
     (let ((acc null))
-      (for/pool ((v (new-pool)))
+      (for/pool ((v (make-pool)))
         (set! acc (cons v acc)))
       (check-equal? acc null))
     (let ((acc null)
-          (pool (new-pool)))
+          (pool (make-pool)))
       (for ((n (reverse '(1 2 3 4))))
         (pool-put! pool 'first n))
       (for ((n (reverse '(5 6 7 8))))
@@ -514,7 +520,7 @@
         (set! acc (cons v acc)))
       (check-equal? (sort acc >) '(8 7 6 5 4 3 2 1)))
     (let ((acc null)
-          (pool (new-pool)))
+          (pool (make-pool)))
       (for ((n (reverse '(1 2 3 4))))
         (pool-put! pool 'first n))
       (for ((n (reverse '(5 6 7 8))))
@@ -534,55 +540,58 @@
 
 ;;
 
-(define transport<%> (interface () get-name make))
+(define-struct connection
+  (transport host port in out)
+  #:prefab
+  #:constructor-name -make-connection)
+
+(define transport<%> (interface () get-name connect))
 
 (define plaintext%
   (class* object% (transport<%>)
     (super-new)
     (define/public (get-name) 'plaintext)
-    (define/public (make host port)
-      (let*-values (((in out) (tcp-connect host port)))
-        (connection this host port in out)))))
+    (define/public (connect host port)
+      (tcp-connect host port))))
 
 (define tls%
   (class* object% (transport<%>)
     (super-new)
     (define/public (get-name) 'tls)
-    (define/public (make host port)
-      (let*-values (((in out) (ssl-connect host port 'secure)))
-        (connection this host port in out)))))
+    (define/public (connect host port)
+      (ssl-connect host port 'secure))))
 
 (define current-transport (make-parameter (new plaintext%)))
 
+(define (connect host port
+                 #:transport (transport (current-transport)))
+  (let-values (((in out) (send transport connect host port)))
+    (-make-connection transport
+                      host port
+                      in out)))
 
-;;
+(define (make-connection-key host port
+                             #:transport (transport (current-transport)))
+  (format "~a-~a-~a"
+          (send transport get-name)
+          host port))
 
-(define-struct connection
-  (transport host port in out)
-  #:prefab)
-
-(define/contract (connect transport host port)
-  (-> (is-a?/c transport<%>) string? exact-nonnegative-integer? connection?)
-  (send transport make host port))
-
-(define (make-connection-key transport host port)
-  (string->symbol (format "~a-~a-~a" (send transport get-name) host port)))
-
-(define/contract (connection-get! pool transport host port)
-  (-> pool? (is-a?/c transport<%>) string? exact-nonnegative-integer? connection?)
-  (or (let ((connection (pool-get! pool (make-connection-key transport host port))))
+(define (connection-get! host port
+                         #:pool (pool (current-pool))
+                         #:transport (transport (current-transport)))
+  (or (let* ((key (make-connection-key host port #:transport transport))
+             (connection (pool-get! pool key)))
         (and connection
              (match (sync/timeout 0 (peek-bytes-evt 1 0 #f (connection-in connection)))
                ((? eof-object?) #f) ;; connection timeout or closed
                (_ connection))))
-      (connect transport host port)))
+      (connect host port #:transport transport)))
 
-(define/contract (connection-put! pool connection)
-  (-> pool? connection? void?)
+(define (connection-put! connection #:pool (pool (current-pool)))
   (pool-put! pool
-             (make-connection-key (connection-transport connection)
-                                  (connection-host connection)
-                                  (connection-port connection))
+             (make-connection-key (connection-host connection)
+                                  (connection-port connection)
+                                  #:transport (connection-transport connection))
              connection))
 
 (module+ test
@@ -590,45 +599,57 @@
     (class* object% (transport<%>)
       (super-new)
       (define/public (get-name) 'test)
-      (define/public (make host port)
-        (connection this host port
-                    (open-input-string "123477777777777777777777777777777777777777")
-                    (open-output-string)))))
+      (define/public (connect host port)
+        (values (open-input-string "123477777777777777777777777777777777777777")
+                (open-output-string)))))
 
   (test-case "make-connection-key"
     (let ((transport (new (class object%
                             (super-new)
                             (define/public (get-name) 'test)))))
-      (check-equal? (make-connection-key transport "example.com" 666)
-                    'test-example.com-666)))
+      (check-equal? (make-connection-key "example.com" 666
+                                         #:transport transport)
+                    "test-example.com-666")))
 
   (test-case "connection-get!"
     (let ((transport (new test-transport%))
-          (pool      (new-pool)))
-      (check-true (connection? (connection-get! pool transport "example.com" 666))))
+          (pool      (make-pool)))
+      (check-true (connection? (connection-get! "example.com" 666
+                                                #:pool pool
+                                                #:transport transport))))
     (let* ((transport  (new test-transport%))
-           (connection (connect transport "example.com" 666))
-           (key        (make-connection-key transport "example.com" 666))
-           (pool       (new-pool)))
+           (connection (connect "example.com" 666 #:transport transport))
+           (key        (make-connection-key "example.com" 666
+                                            #:transport transport))
+           (pool       (make-pool)))
       (pool-put! pool key connection)
-      (let ((connection-from-pool (connection-get! pool transport "example.com" 666)))
+      (let ((connection-from-pool (connection-get! "example.com" 666
+                                                   #:pool pool
+                                                   #:transport transport)))
         (check-eq? (connection-transport connection-from-pool) transport)
         (check-eq? (connection-in connection-from-pool) (connection-in connection))
         (check-eq? (connection-out connection-from-pool) (connection-out connection)))
-      (let ((connection-from-pool (connection-get! pool transport "example.com" 666)))
+      (let ((connection-from-pool (connection-get! "example.com" 666
+                                                   #:pool pool
+                                                   #:transport transport)))
         (check-not-eq? connection-from-pool connection)
         (check-eq? (connection-transport connection-from-pool) transport))))
 
   (test-case "connection-put!"
     (let* ((transport  (new test-transport%))
-           (connection (connect transport "example.com" 666))
-           (pool       (new-pool)))
-      (connection-put! pool connection)
-      (let ((connection-from-pool (connection-get! pool transport "example.com" 666)))
+           (connection (connect "example.com" 666 #:transport transport))
+           (pool       (make-pool)))
+      (connection-put! connection
+                       #:pool pool)
+      (let ((connection-from-pool (connection-get! "example.com" 666
+                                                   #:pool pool
+                                                   #:transport transport)))
         (check-eq? (connection-transport connection-from-pool) transport)
         (check-eq? (connection-in connection-from-pool) (connection-in connection))
         (check-eq? (connection-out connection-from-pool) (connection-out connection)))
-      (let ((connection-from-pool (connection-get! pool transport "example.com" 666)))
+      (let ((connection-from-pool (connection-get! "example.com" 666
+                                                   #:pool pool
+                                                   #:transport transport)))
         (check-not-eq? connection connection-from-pool)
         (check-eq? (connection-transport connection-from-pool) transport)))))
 
@@ -636,12 +657,14 @@
 
 (define-struct client
   (pool)
-  #:prefab)
-(define/contract (new-client)
-  (-> client?)
-  (client (new-pool)))
+  #:prefab
+  #:constructor-name -make-client)
 
-(define current-client (make-parameter (new-client)))
+(define/contract (make-client (pool (current-pool)))
+  (-> client?)
+  (-make-client pool))
+
+(define current-client (make-parameter (make-client)))
 
 ;;
 
@@ -898,13 +921,14 @@
 
 (define-struct request
   (host port method path query headers body)
-  #:prefab)
+  #:prefab
+  #:constructor-name -make-request)
 
-(define/contract (new-request host port path
-                              #:method  (method 'get)
-                              #:query   (query   #f)
+(define/contract (make-request host port path
+                              #:method (method 'get)
+                              #:query (query #f)
                               #:headers (headers #f)
-                              #:body    (body    #f))
+                              #:body (body #f))
   (->* (string? exact-nonnegative-integer? string?)
        (#:method symbol?
         #:query (listof (cons/c symbol? (or/c false/c string?)))
@@ -918,13 +942,15 @@
                     (match (header-ref headers 'Content-Type)
                       ("application/x-www-form-urlencoded"
                        (let ((data
-                              (cond ;; FIXME: I know it is covered by a contract, but could we protect it from divergence?
+                              (cond
                                 ((input-port? body) (port->bytes body))
                                 ((string? body) (string->bytes/utf-8 body))
                                 ((bytes? body) body))))
-                         (set! headers (header-replace headers ('Content-Length (number->string (bytes-length data)))))
+                         (set! headers (header-replace
+                                        headers
+                                        ('Content-Length (number->string (bytes-length data)))))
                          (open-input-bytes data)))))))
-    (make-request host port method path query headers body)))
+    (-make-request host port method path query headers body)))
 
 (define (encode-method method)
   (string-upcase (symbol->string method)))
@@ -986,7 +1012,7 @@
     (let ((out (open-output-string)))
       (check-equal?
        (begin
-         (request-write (new-request "127.0.0.1" 8080 "/hello you"
+         (request-write (make-request "127.0.0.1" 8080 "/hello you"
                                      #:query '((foo . "bar"))
                                      #:headers '((Host . "example.com")))
                         out)
@@ -1004,20 +1030,22 @@
 
 (define-struct response
   (protocol-version status status-text headers body-reader)
-  #:prefab)
-(define/contract (new-response protocol-version status status-text headers body-reader)
+  #:prefab
+  #:constructor-name -make-response)
+
+(define/contract (make-response protocol-version status status-text headers body-reader)
   (-> (listof exact-nonnegative-integer?) integer? string?
       headers?
       input-port?
       response?)
-  (make-response protocol-version status status-text headers body-reader))
+  (-make-response protocol-version status status-text headers body-reader))
 
 (define (response-read (in (current-input-port)))
   (let-values (((protocol-version status status-text)
                 (decode-status-line (read-until-crlf in))))
-    (new-response protocol-version status status-text
-                  (headers-read in)
-                  in)))
+    (make-response protocol-version status status-text
+                   (headers-read in)
+                   in)))
 
 (define (make-response-port client connection request response)
   (let* ((headers (response-headers response))
@@ -1026,7 +1054,8 @@
          (content-length (string->number (header-ref headers 'Content-Length "")))
          (free (lambda (port)
                  (if keep-alive?
-                     (connection-put! (client-pool client) connection)
+                     (connection-put! connection
+                                      #:pool (client-pool client))
                      (close-input-port port)))))
     (cond ((exact-nonnegative-integer? content-length)
            (make-limited-input-port body-reader content-length #:on-close free))
@@ -1037,10 +1066,10 @@
 (define (request-send! req
                        #:client    (client    (current-client))
                        #:transport (transport (current-transport)))
-  (let* ((connection (connection-get! (client-pool client)
-                                      transport
-                                      (request-host req)
-                                      (request-port req))))
+  (let* ((connection (connection-get! (request-host req)
+                                      (request-port req)
+                                      #:pool (client-pool client)
+                                      #:transport transport)))
     (let ((out (connection-out connection)))
       (request-write req out)
       (flush-output out))
@@ -1068,6 +1097,6 @@
     (let* ((in (open-input-string "HTTP/1.1 200 This is fine\r\nFoo: bar\r\n\r\nhello"))
            (response (response-read in)))
       (check-equal? response
-                    (new-response '(1 1) 200 "This is fine"
-                                  (make-headers ('Foo "bar")) in))
+                    (make-response '(1 1) 200 "This is fine"
+                                   (make-headers ('Foo "bar")) in))
       (check-equal? (port->string in) "hello"))))
