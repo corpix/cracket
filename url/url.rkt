@@ -173,8 +173,8 @@
                       (loop buf (+ 1 n) (+ 1 i)))
                      ((url-encode? c mode)
                       (bytes-set! buf i #x25) ;; %
-                      (bytes-set! buf (+ 1 i) (integer->hex-char (arithmetic-shift c -4)))
-                      (bytes-set! buf (+ 2 i) (integer->hex-char (bitwise-and c 15)))
+                      (bytes-set! buf (+ 1 i) (char->integer (integer->hex-char (arithmetic-shift c -4))))
+                      (bytes-set! buf (+ 2 i) (char->integer (integer->hex-char (bitwise-and c 15))))
                       (loop buf (+ 1 n) (+ 3 i)))
                      (else
                       (bytes-set! buf i c)
@@ -452,6 +452,9 @@
 
 (module+ test
   (require rackunit)
+  (test-case "url-encode"
+    (check-equal? (url-encode "?!@#$%")
+                  "%3f%21%40%23%24%25"))
   (test-case "string->url"
     (check-equal? (string->url "http://localhost")
                   (make-url #:scheme "http" #:host "localhost"))
