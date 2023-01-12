@@ -66,7 +66,7 @@
 ;;
 
 (define default-scheme-port-dispatcher
-  (let* ((t (make-hasheq))
+  (let* ((t (make-hash))
          (put! (lambda (k v)
                  (begin0 t
                    (hash-set! t k v)))))
