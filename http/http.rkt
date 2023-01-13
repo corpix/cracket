@@ -1203,12 +1203,12 @@
 (define-syntax (with-request stx)
   (syntax-case stx ()
     ((_ (response-sym request-expr) body ...)
-     (syntax
-      (let ((response-sym request-expr))
-	(dynamic-wind
-          void
-          (thunk body ...)
-          (thunk (close-input-port (response-body-reader name)))))))))
+     (syntax/loc stx
+       (let ((response-sym request-expr))
+         (dynamic-wind
+           void
+           (thunk body ...)
+           (thunk (close-input-port (response-body-reader name)))))))))
 
 ;; (http "https://corpix.dev")
 
