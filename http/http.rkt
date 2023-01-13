@@ -961,14 +961,10 @@
   (let* ((headers (if (not headers)
                       (make-default-http-headers host)
                       (apply http-header-replace (make-default-http-headers host) headers)))
-         (body (cond (form (http-header-replace headers '(Content-Type "application/x-www-form-urlencoded"))
-                           (let ((data
-                                  (cond
-                                    ((input-port? body) (port->bytes body))
-                                    ((string? body) (string->bytes/utf-8 body))
-                                    ((bytes? body) body))))
+         (body (cond (form (let* ((data (string->bytes/utf-8 (alist->form-urlencoded form))))
                              (set! headers (http-header-replace
                                             headers
+                                            '(Content-Type . "application/x-www-form-urlencoded")
                                             `(Content-Length . ,(number->string (bytes-length data)))))
                              (open-input-bytes data)))
                      (multipart (let* ((boundary (multipart-form-random-boundary))
@@ -976,7 +972,10 @@
                                        (header `(Content-Type . ,(multipart-form-content-type boundary))))
                                   (set! headers (http-header-replace headers header))
                                   (open-input-bytes (multipart-form->bytes form))))
-                     (body body)
+                     (body (cond
+                             ((input-port? body) (port->bytes body))
+                             ((string? body) (string->bytes/utf-8 body))
+                             ((bytes? body) body)))
                      (else #f))))
     (-make-http-request
      host port
@@ -1017,20 +1016,20 @@
     (when body (copy-port body out))))
 
 (module+ test
-  (test-case "encode-method"
+  (test-case "http-url-encode-method"
     (check-equal? (http-encode-method 'get) "GET"))
 
-  (test-case "encode-path"
+  (test-case "http-url-encode-path"
     (check-equal? (http-url-encode-path "/foo/bar") "/foo/bar")
     (check-equal? (http-url-encode-path "/foo/bar baz") "/foo/bar%20baz"))
 
-  (test-case "encode-query"
+  (test-case "http-url-encode-query"
     (check-equal? (http-url-encode-query '((lain . "iwakura") (misami . "eiri")))
                   "lain=iwakura&misami=eiri")
     (check-equal? (http-url-encode-query '((action . "all love lain")))
                   "action=all+love+lain"))
 
-  (test-case "request-line-encode"
+  (test-case "http-request-line-encode"
     (check-equal? (http-request-line-encode 'get  "/foo/bar") "GET /foo/bar HTTP/1.1")
     (check-equal? (http-request-line-encode 'put  "/foo bar") "PUT /foo%20bar HTTP/1.1")
     (check-equal? (http-request-line-encode 'post "/foo bar") "POST /foo%20bar HTTP/1.1")
@@ -1038,16 +1037,60 @@
                                             #:query '((baz . "qux") (quax . "and yellow ducks")))
                   "GET /foo%20bar?baz=qux&quax=and+yellow+ducks HTTP/1.1"))
 
-  (test-case "request-write"
-    (let ((out (open-output-string)))
-      (check-equal?
-       (begin
+  (test-case "http-request-write"
+    (check-equal?
+     (let ((out (open-output-string)))
+       (http-request-write (make-http-request "127.0.0.1" 8080 "/hello you"
+                                              #:query '((foo . "bar"))
+                                              #:headers '((Host . "example.com")))
+                           out)
+       (get-output-string out))
+     (string-join (list "GET /hello%20you?foo=bar HTTP/1.1"
+                        "Host: example.com"
+                        "User-Agent: corpix-http/1.0"
+                        "Accept: */*"
+                        "Connection: close"
+                        "" "")
+                  "\r\n"))
+    (check-equal?
+     (let ((out (open-output-string)))
+       (http-request-write (make-http-request "127.0.0.1" 8080 "/hello you"
+                                              #:form '((foo . "bar"))
+                                              #:headers '((Host . "example.com")))
+                           out)
+       (get-output-string out))
+     (string-join (list "GET /hello%20you HTTP/1.1"
+                        "Host: example.com"
+                        "User-Agent: corpix-http/1.0"
+                        "Accept: */*"
+                        "Connection: close"
+                        "Content-Type: application/x-www-form-urlencoded"
+                        "Content-Length: 7"
+                        ""
+                        "foo=bar")
+                  "\r\n"))
+    (check-equal?
+     (let ((out (open-output-string)))
+       (parameterize ((current-multipart-form-random-source make-bytes))
          (http-request-write (make-http-request "127.0.0.1" 8080 "/hello you"
-                                                #:query '((foo . "bar"))
-                                                #:headers '((Host . "example.com")))
-                             out)
-         (get-output-string out))
-       "GET /hello%20you?foo=bar HTTP/1.1\r\nHost: example.com\r\nUser-Agent: corpix-http/1.0\r\nAccept: */*\r\nConnection: close\r\n\r\n"))))
+                                              #:multipart '((foo . "bar"))
+                                              #:headers '((Host . "example.com")))
+                           out))
+       (get-output-string out))
+     (string-join (list "GET /hello%20you HTTP/1.1"
+                        "Host: example.com"
+                        "User-Agent: corpix-http/1.0"
+                        "Accept: */*"
+                        "Connection: close"
+                        "Content-Type: multipart/form-data; boundary=000000000000000000000000000000000000000000000000000000000000"
+                        ""
+                        "--000000000000000000000000000000000000000000000000000000000000"
+                        "Content-Disposition: form-data; name=foo"
+                        ""
+                        "bar"
+                        "--000000000000000000000000000000000000000000000000000000000000--"
+                        "")
+                  "\r\n"))))
 
 ;;
 
