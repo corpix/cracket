@@ -1,22 +1,26 @@
 pkg := raco pkg
-install := $(pkg) install --skip-installed
-uninstall := $(pkg) remove
+racoinstall := $(pkg) install --skip-installed
+racouninstall := $(pkg) remove
 
 .PHONY: install
 install:
-	$(install) -n corpix-hex      file://$(PWD)/hex
-	$(install) -n corpix-json     file://$(PWD)/json
-	$(install) -n corpix-url      file://$(PWD)/url
-	$(install) -n corpix-http     file://$(PWD)/http
-	$(install) -n corpix-telegram file://$(PWD)/telegram
+	$(racoinstall) -n corpix-bytes     file://$(PWD)/bytes
+	$(racoinstall) -n corpix-hex       file://$(PWD)/hex
+	$(racoinstall) -n corpix-json      file://$(PWD)/json
+	$(racoinstall) -n corpix-url       file://$(PWD)/url
+	$(racoinstall) -n corpix-multipart file://$(PWD)/multipart
+	$(racoinstall) -n corpix-http      file://$(PWD)/http
+	$(racoinstall) -n corpix-telegram  file://$(PWD)/telegram
 
 .PHONY: uninstall
 uninstall:
-	-$(uninstall) corpix-hex
-	-$(uninstall) corpix-json
-	-$(uninstall) corpix-url
-	-$(uninstall) corpix-http
-	-$(uninstall) corpix-telegram
+	-$(racouninstall) corpix-bytes
+	-$(racouninstall) corpix-hex
+	-$(racouninstall) corpix-json
+	-$(racouninstall) corpix-url
+	-$(racouninstall) corpix-multipart
+	-$(racouninstall) corpix-http
+	-$(racouninstall) corpix-telegram
 
 .PHONY: reinstall
 reinstall: uninstall install
