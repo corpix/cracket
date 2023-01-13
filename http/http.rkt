@@ -1208,7 +1208,7 @@
          (dynamic-wind
            void
            (thunk body ...)
-           (thunk (close-input-port (response-body-reader name)))))))))
+           (thunk (close-input-port (http-response-body-reader response-sym)))))))))
 
 ;; (http "https://corpix.dev")
 
