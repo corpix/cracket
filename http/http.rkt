@@ -1,5 +1,6 @@
 #lang racket
 (require racket
+         (for-syntax racket/syntax)
          net/uri-codec
          corpix/url
          corpix/multipart
@@ -72,7 +73,7 @@
          ;; http-put
          ;; http-delete
          ;; http-options
-         )
+         with-request)
 (module+ test
   (require rackunit))
 
@@ -1198,6 +1199,16 @@
                         #:client client
                         ;; FIXME: cache transports, they have no state
                         #:transport (make-http-transport (url-scheme u)))))
+
+(define-syntax (with-request stx)
+  (syntax-case stx ()
+    ((_ (response-sym request-expr) body ...)
+     (syntax
+      (let ((response-sym request-expr))
+	(dynamic-wind
+          void
+          (thunk body ...)
+          (thunk (close-input-port (response-body-reader name)))))))))
 
 ;; (http "https://corpix.dev")
 
