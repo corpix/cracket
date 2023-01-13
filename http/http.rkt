@@ -1124,7 +1124,8 @@
 
 (define (make-http-response-port client connection request response)
   (let* ((headers (http-response-headers response))
-         (keep-alive? (http-headers-has (http-request-headers request) ('Connection "keep-alive")))
+         (keep-alive? (http-headers-has (http-request-headers request)
+                                        '(Connection . "keep-alive")))
          (body-reader (http-response-body-reader response))
          (content-length (string->number (http-header-ref headers 'Content-Length "")))
          (free (lambda (port)
@@ -1134,7 +1135,7 @@
                      (close-input-port port)))))
     (cond ((exact-nonnegative-integer? content-length)
            (make-limited-input-port body-reader content-length #:on-close free))
-          ((http-headers-has headers ('Transfer-Encoding "chunked"))
+          ((http-headers-has headers '(Transfer-Encoding . "chunked"))
            (make-chunked-input-port body-reader #:on-close free))
           (else body-reader))))
 
@@ -1183,17 +1184,22 @@
 (define (http url
               #:client (client (current-http-client))
               #:method (method 'get)
+              #:query (query #f)
               #:headers (headers #f)
+              #:form (form #f)
+              #:multipart (multipart #f)
               #:body (body #f))
   (let* ((u (string->url url))
          (host (url-host u))
          (port (or (url-port u) (url-scheme->port (url-scheme u))))
+         (query (or query (and (url-query? u) (url-query u))))
          (req (make-http-request host port
                                  (if (url-path? u) (url-path u) "/")
                                  #:method method
-                                 #:query (and (url-query? u)
-                                              (form-urlencoded->alist (url-query u)))
+                                 #:query query
                                  #:headers headers
+                                 #:form form
+                                 #:multipart multipart
                                  #:body body)))
     (http-request-send! req
                         #:client client
