@@ -1073,9 +1073,9 @@
      (let ((out (open-output-string)))
        (parameterize ((current-multipart-form-random-source make-bytes))
          (http-request-write (make-http-request "127.0.0.1" 8080 "/hello you"
-                                              #:multipart '((foo . "bar"))
-                                              #:headers '((Host . "example.com")))
-                           out))
+                                                #:multipart '((foo . "bar"))
+                                                #:headers '((Host . "example.com")))
+                             out))
        (get-output-string out))
      (string-join (list "GET /hello%20you HTTP/1.1"
                         "Host: example.com"
