@@ -4,7 +4,7 @@
          racket/contract)
 
 (provide
- json-null
+ current-json-null
  json?
 
  (contract-out
@@ -37,9 +37,9 @@
         (#:null any/c)
         any))))
 
-(define json-null (make-parameter 'null))
+(define current-json-null (make-parameter 'null))
 
-(define (json? x #:null (jsnull (json-null)))
+(define (json? x #:null (jsnull (current-json-null)))
   (let loop ((x x))
     (or (exact-integer? x)
         (inexact-rational? x)
@@ -54,7 +54,8 @@
   (and (inexact-real? x) (rational? x)))
 
 (define (write-json x (o (current-output-port))
-                    #:null (jsnull (json-null)) #:encode (enc 'control))
+                    #:null (jsnull (current-json-null))
+                    #:encode (enc 'control))
   (write-json* 'write-json x o jsnull enc))
 
 (define (write-json* who x o jsnull enc)
@@ -111,19 +112,19 @@
            (write-bytes #"{" o)
            (define first? #t)
            (for (((k v) (in-hash x)))
-             (unless (symbol? k)
-               (raise-type-error who "symbol" k))
+             (unless (string? k)
+               (raise-type-error who "string" k))
              (if first? (set! first? #f) (write-bytes #"," o))
              ;; use a string encoding so we get the same deal with
              ;; `rx-to-encode'
-             (write-json-string (symbol->string k))
+             (write-json-string k)
              (write-bytes #":" o)
              (loop v))
            (write-bytes #"}" o))
           (else (raise-type-error who "int|bool|null|str|list|hash" x))))
   (void))
 
-(define (read-json (i (current-input-port)) #:null (jsnull (json-null)))
+(define (read-json (i (current-input-port)) #:null (jsnull (current-json-null)))
   (read-json* 'read-json i jsnull))
 
 (define (read-json* who i jsnull)
@@ -264,8 +265,8 @@
       (unless (char=? #\: ch)
         (err "error while parsing a json object pair"))
       (read-byte i)
-      (cons (string->symbol k) (read-json)))
-    (for/hasheq ((p (in-list (read-list 'object #\} read-pair))))
+      (cons k (read-json)))
+    (for/hash ((p (in-list (read-list 'object #\} read-pair))))
       (values (car p) (cdr p))))
   ;;
   (define (read-literal bstr)
@@ -426,18 +427,18 @@
                                               bstr))))))
   (read-json #t))
 
-(define (json->string x #:null (jsnull (json-null)) #:encode (enc 'control))
-  (define o (open-output-string))
-  (write-json* 'json->string x o jsnull enc)
-  (get-output-string o))
+(define (json->string value #:null (jsnull (current-json-null)) #:encode (enc 'control))
+  (define out (open-output-string))
+  (write-json* 'json->string value out jsnull enc)
+  (get-output-string out))
 
-(define (json->bytes x #:null (jsnull (json-null)) #:encode (enc 'control))
+(define (json->bytes x #:null (jsnull (current-json-null)) #:encode (enc 'control))
   (define o (open-output-bytes))
   (write-json* 'json->bytes x o jsnull enc)
   (get-output-bytes o))
 
-(define (string->json str #:null (jsnull (json-null)))
+(define (string->json str #:null (jsnull (current-json-null)))
   (read-json* 'string->json (open-input-string str) jsnull))
 
-(define (bytes->json bs #:null (jsnull (json-null)))
+(define (bytes->json bs #:null (jsnull (current-json-null)))
   (read-json* 'bytes->json (open-input-bytes bs) jsnull))
