@@ -2,56 +2,57 @@
 (require (for-syntax racket/syntax)
          corpix/http
          corpix/json)
-(provide current-token
-         current-url
-         current-timeout
-         current-poll-timeout
-         current-log
+(provide current-telegram-token
+         current-telegram-url
+         current-telegram-timeout
+         current-telegram-poll-timeout
+         current-telegram-log
 
-         get-me
-         get-updates
-         send-message
-         send-photo
-         answer-inline-query
-
-         dispatch
-         for/telegram)
+         define-telegram
+         telegram-get-me
+         telegram-get-updates
+         telegram-send-message
+         telegram-send-photo
+         telegram-answer-inline-query
+         telegram-loop)
 
 
 ;;
 
-(define current-token (make-parameter ""))
-(define current-url (make-parameter "https://api.telegram.org"))
-(define current-timeout (make-parameter 5))
-(define current-poll-timeout (make-parameter 120))
-(define current-log (make-parameter displayln))
+(define current-telegram-token (make-parameter ""))
+(define current-telegram-url (make-parameter "https://api.telegram.org"))
+(define current-telegram-timeout (make-parameter 5))
+(define current-telegram-poll-timeout (make-parameter 120))
+(define current-telegram-log (make-parameter displayln))
 
 ;;
 
 (define (uri method)
-  (string-append (current-url)
-		 "/bot" (current-token)
+  (string-append (current-telegram-url)
+		 "/bot" (current-telegram-token)
 		 "/" method))
 
 ;;
 
 (define (encode-query payload)
-  (for/list (((k v) payload))
-    (cons k (format "~a" v))))
+  (for/list ((kv payload))
+    (cons (car kv) (format "~a" (cdr kv)))))
 
 (define (encode-json payload)
-  (json->string (make-hasheq payload)))
+  (json->string (make-hash payload)))
 
 (define (decode-json response)
-  (let ((payload (read-json (response-body-reader response))))
-    (unless (hash-ref payload 'ok)
+  (let ((payload (read-json (http-response-body-reader response))))
+    (unless (hash-ref payload "ok")
       (error "server responded with an error: "
-             (hash-ref payload 'error_code)
-             (hash-ref payload 'description "")))
-    (hash-ref payload 'result)))
+             (hash-ref payload "error_code")
+             (hash-ref payload "description" "")))
+    (hash-ref payload "result")))
 
 ;;
 
+
+;; FIXME: rewrite using syntax-case
 (begin-for-syntax
   (define (payload-syntax kwargs)
     (define pairs '())
@@ -59,111 +60,96 @@
       (let ((argp (syntax-e arg)))
 	(cond
           ((symbol? argp) ;; required argument
-           (with-syntax ((key (symbol->string argp))
+           (with-syntax ((key argp)
                          (value arg))
              (set! pairs
-               (cons (syntax (cons key value))
+               (cons (syntax (cons 'key value))
                      pairs))))
           ((pair? argp) ;; optional argument
            (let* ((sym (car argp))
                   (name (syntax->datum sym)))
-             (with-syntax ((key (symbol->string name))
+             (with-syntax ((key name)
                            (value sym))
                (set! pairs
-                 (cons (syntax (cons key value))
+                 (cons (syntax (cons 'key value))
                        pairs))))))))
     (cons 'list pairs)))
+
 ;;(kwargs->alist-stx (syntax (foo: (bar 0) baz: (qux 1) ducks: oops)))
 ;; => (list (cons qux qux) (cons bar bar))
 
-(define-syntax (define-botapi-method stx)
+(define-syntax (define-telegram stx)
   (syntax-case stx ()
     ((_ (name http-method method-name)
 	(kind arguments ...)
 	(encode decode))
      (let ((request-kind (syntax->datum #'kind)))
        (with-syntax* ((headers (case request-kind
-				 ((query multipart) (syntax #f))
+				 ((query multipart) (syntax '()))
 				 ((json)            (syntax '(("Content-Type" . "application/json"))))))
 		      (payload (payload-syntax #'(arguments ...)))
-		      (request-key (cond
-                                     ((eq? request-kind 'query) 'query)
-                                     ((eq? request-kind 'json) 'body)
-                                     ((eq? request-kind 'multipart) 'multipart)
-                                     (else (error (format "unsupported request kind: ~a" request-kind))))))
-	 (syntax (define (name arguments ...)
-		   (displayln method-name)
-		   (with-request (req (http-request http-method (uri method-name)
-						    request-key (if encode (encode payload) payload)
-						    headers: headers))
-                     (decode req)))))))))
+		      (body-kw (cond
+                                 ((eq? request-kind 'query) (syntax #:query))
+                                 ((eq? request-kind 'json) (syntax #:body))
+                                 ((eq? request-kind 'multipart) (syntax #:multipart))
+                                 (else (error (format "unsupported request kind: ~a" request-kind))))))
+	 (syntax/loc stx
+           (define (name arguments ...)
+             (with-request (res (http (uri method-name)
+                                      body-kw (if encode (encode payload) payload)
+                                      #:method http-method
+                                      #:headers headers))
+               (decode res)))))))))
 
-(define-botapi-method
-  (get-me 'GET "getMe")
+(define-telegram (telegram-get-me 'GET "getMe")
   (query)
   (encode-query decode-json))
 
-(define-botapi-method
-  (get-updates 'GET "getUpdates")
+(define-telegram (telegram-get-updates 'GET "getUpdates")
   (query #:limit (limit 100)
 	 #:offset (offset 0)
-	 #:timeout (timeout (current-poll-timeout)))
+	 #:timeout (timeout (current-telegram-poll-timeout)))
   (encode-query decode-json))
 
-(define-botapi-method
-  (send-message 'POST "sendMessage")
+(define-telegram (telegram-send-message 'POST "sendMessage")
   (json #:chat-id chat_id
 	#:text text)
   (encode-json decode-json))
 
-(define-botapi-method
-  (send-photo 'POST "sendPhoto")
+(define-telegram (telegram-send-photo 'POST "sendPhoto")
   (multipart #:chat-id chat_id
 	     #:photo photo
 	     #:caption (caption ""))
   (#f decode-json))
 
-(define-botapi-method
-  (answer-inline-query 'POST "answerInlineQuery")
+(define-telegram (telegram-answer-inline-query 'POST "answerInlineQuery")
   (json #:query-id inline_query_id
 	#:answers results)
   (encode-json decode-json))
 
 ;;
 
-(define-syntax dispatch
-  (syntax-rules (<>)
-    ((dispatch <> case0 cases ...)
-     (lambda (t) (dispatch t case0 cases ...)))
-    ((dispatch table (key action) ...)
-     (let ((t table))
-       (and (hash-table? t)
-	    (let ((results
-		   (cond*
-		    ((hash-ref t key #f) => action) ...)))
-	      (if (pair? results)
-                  results #f)))))))
-
-(define-syntax for/telegram
+(define-syntax telegram-loop
   (syntax-rules ()
-    ((for/telegram sym body0 body ...)
+    ((_ sym body0 body ...)
      (let ((thunk (lambda (sym) body0 body ...))
 	   (offset 0))
-       (let loop ((updates (get-updates)))
+       (let loop ((updates (telegram-get-updates)))
 	 (for ((update updates))
-	   (unless (hash-table? update)
+	   (unless (hash? update)
 	     (error "expected update to be a hash-table, got:" update))
-	   (set! offset (hash-ref update 'update_id))
-	   (current-log (json-object->string update))
+	   (set! offset (hash-ref update "update_id"))
+	   (current-telegram-log (json->string update))
 	   (thunk update))
-	 (loop (get-updates offset: (+ 1 offset))))))))
+	 (loop (telegram-get-updates #:offset (+ 1 offset))))))))
 
 (module+ test
   (require rackunit)
   (test-case "encode-query"
-    (equal? '((1 . "1") (2 . "a"))
-            (encode-query (make-hasheq '((1 . 1) (2 . "a"))))))
+    (check-equal? '((1 . "1") (2 . "a"))
+                  (encode-query (make-hasheq '((1 . 1) (2 . "a"))))))
   (test-case "encode-json"
-    (equal?
-     "{\"a\":1,\"b\":2}"
-     (encode-json '((a . 1) (b . 2))))))
+    ;; NOTE: hashes are unordered, so decoding json to make tests stable
+    (check-equal? (string->json "{\"a\":1,\"b\":2}")
+                  (string->json (encode-json '((a . 1) (b . 2)))))))
+
