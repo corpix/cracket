@@ -970,9 +970,15 @@
                              (open-input-bytes data)))
                      (multipart (let* ((boundary (multipart-form-random-boundary))
                                        (form (make-multipart-form boundary multipart))
-                                       (header `(Content-Type . ,(multipart-form-content-type boundary))))
-                                  (set! headers (http-header-replace headers header))
-                                  (open-input-bytes (multipart-form->bytes form))))
+                                       ;; FIXME: no need to read it into memory if you could
+                                       ;; know where is a file. Because this file could be then stat'ed
+                                       ;; and we could stream multipart upload
+                                       (data (multipart-form->bytes form)))
+                                  (set! headers (http-header-replace
+                                                 headers
+                                                 `(Content-Type . ,(multipart-form-content-type boundary))
+                                                 `(Content-Length . ,(number->string (bytes-length data)))))
+                                  (open-input-bytes data)))
                      (body (cond
                              ((input-port? body) (port->bytes body))
                              ((string? body) (string->bytes/utf-8 body))
@@ -1084,6 +1090,7 @@
                         "Accept: */*"
                         "Connection: close"
                         "Content-Type: multipart/form-data; boundary=000000000000000000000000000000000000000000000000000000000000"
+                        "Content-Length: 179"
                         ""
                         "--000000000000000000000000000000000000000000000000000000000000"
                         "Content-Disposition: form-data; name=foo"
