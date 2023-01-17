@@ -485,12 +485,12 @@
               (prometheus-set! gc-post-admin-amount-metric
                                post-admin-amount
                                #:labels labels)
-              (prometheus-set! gc-process-time-metric
-                               (- end-process-time start-process-time)
-                               #:labels labels)
-              (prometheus-set! gc-time-metric
-                               (- end-time start-time)
-                               #:labels labels))
+              (prometheus-increment! gc-process-time-metric
+                                     #:by (- end-process-time start-process-time)
+                                     #:labels labels)
+              (prometheus-increment! gc-time-metric
+                                     #:by (- end-time start-time)
+                                     #:labels labels))
             (loop timer-evt))
            ((app (lambda (v) (eq? v timer-evt)) #t)
             (prometheus-set! gc-current-milliseconds-metric (current-gc-milliseconds))
