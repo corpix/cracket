@@ -4,19 +4,21 @@ racouninstall := $(pkg) remove
 
 .PHONY: install
 install:
-	$(racoinstall) -n corpix-bytes     file://$(PWD)/bytes
-	$(racoinstall) -n corpix-hex       file://$(PWD)/hex
-	$(racoinstall) -n corpix-json      file://$(PWD)/json
-	$(racoinstall) -n corpix-url       file://$(PWD)/url
-	$(racoinstall) -n corpix-multipart file://$(PWD)/multipart
-	$(racoinstall) -n corpix-http      file://$(PWD)/http
-	$(racoinstall) -n corpix-telegram  file://$(PWD)/telegram
+	$(racoinstall) -n corpix-bytes      file://$(PWD)/bytes
+	$(racoinstall) -n corpix-hex        file://$(PWD)/hex
+	$(racoinstall) -n corpix-json       file://$(PWD)/json
+	$(racoinstall) -n corpix-prometheus file://$(PWD)/prometheus
+	$(racoinstall) -n corpix-url        file://$(PWD)/url
+	$(racoinstall) -n corpix-multipart  file://$(PWD)/multipart
+	$(racoinstall) -n corpix-http       file://$(PWD)/http
+	$(racoinstall) -n corpix-telegram   file://$(PWD)/telegram
 
 .PHONY: uninstall
 uninstall:
 	-$(racouninstall) corpix-bytes
 	-$(racouninstall) corpix-hex
 	-$(racouninstall) corpix-json
+	-$(racouninstall) corpix-prometheus
 	-$(racouninstall) corpix-url
 	-$(racouninstall) corpix-multipart
 	-$(racouninstall) corpix-http
