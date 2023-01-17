@@ -434,3 +434,72 @@
                                      "foo_bucket{le=\"+Inf\",c=\"d\"} 2"
                                      "")
                                "\n"))))
+
+(struct gc-info
+  (mode pre-amount pre-admin-amount code-amount
+        post-amount post-admin-amount
+        start-process-time end-process-time
+        start-time end-time)
+  #:prefab)
+
+(define (prometheus-runtime-metrics-thread #:registry (registry (current-prometheus-registry))
+                                           #:interval (interval 15000))
+  (thread
+   (lambda ()
+     (let  ((gc-log (make-log-receiver (current-logger) 'debug 'GC))
+            (timer (lambda (t) (alarm-evt (+ (current-inexact-milliseconds) t))))
+            (gc-run (make-prometheus-metric-counter 'racket_runtime_gc_run))
+            (gc-code-amount-metric (make-prometheus-metric-gauge 'racket_runtime_gc_code_amount))
+            (gc-post-amount-metric (make-prometheus-metric-gauge 'racket_runtime_gc_post_amount))
+            (gc-post-admin-amount-metric (make-prometheus-metric-gauge 'racket_runtime_gc_post_admin_amount))
+            (gc-process-time-metric (make-prometheus-metric-gauge 'racket_runtime_gc_process_time))
+            (gc-time-metric (make-prometheus-metric-gauge 'racket_runtime_gc_time))
+            (gc-current-milliseconds-metric (make-prometheus-metric-gauge 'racket_runtime_gc_current_milliseconds))
+            (current-memory-use-metric (make-prometheus-metric-gauge 'racket_runtime_current_memory_use))
+            (current-process-milliseconds-metric (make-prometheus-metric-gauge 'racket_runtime_current_process_milliseconds)))
+       (for ((metric (list gc-run
+                           gc-code-amount-metric
+                           gc-post-amount-metric
+                           gc-post-admin-amount-metric
+                           gc-process-time-metric
+                           gc-time-metric
+                           gc-current-milliseconds-metric
+                           current-memory-use-metric
+                           current-process-milliseconds-metric)))
+         (prometheus-register! metric #:registry registry))
+       (let loop ((timer-evt (timer interval)))
+         (match (sync (thread-receive-evt) gc-log timer-evt)
+           ((vector level message (gc-info mode pre-amount pre-admin-amount code-amount
+                                           post-amount post-admin-amount
+                                           start-process-time end-process-time
+                                           start-time end-time) topic)
+            (let ((labels `((mode . ,mode))))
+              (prometheus-increment! gc-run
+                                     #:labels labels)
+              (prometheus-set! gc-code-amount-metric
+                               code-amount
+                               #:labels labels)
+              (prometheus-set! gc-post-amount-metric
+                               post-amount
+                               #:labels labels)
+              (prometheus-set! gc-post-admin-amount-metric
+                               post-admin-amount
+                               #:labels labels)
+              (prometheus-set! gc-process-time-metric
+                               (- end-process-time start-process-time)
+                               #:labels labels)
+              (prometheus-set! gc-time-metric
+                               (- end-time start-time)
+                               #:labels labels))
+            (loop timer-evt))
+           ((app (lambda (v) (eq? v timer-evt)) #t)
+            (prometheus-set! gc-current-milliseconds-metric (current-gc-milliseconds))
+            (prometheus-set! current-memory-use-metric (current-memory-use))
+            (prometheus-set! current-process-milliseconds-metric (current-process-milliseconds))
+            (loop (timer interval)))
+           ((app (lambda (v) (eq? v (thread-receive-evt))) #t)
+            (void))))))))
+
+;; (prometheus-runtime-metrics-thread)
+
+;; (displayln (prometheus-metrics-format))
