@@ -150,7 +150,7 @@
                                                 (bnf-state-commit! state (bytes-length r))
                                                 (vector))))))))
                ((symbol? rule-val) (syntax/loc stx rule))
-               (else (error "Expected symbol or string, got" rule-val)))))
+               (else (error "expected symbol or string, got" rule-val)))))
 	 (syntax/loc stx transformer))))))
 
 ;; ~bnf-parse-aux expands all rules providen and
