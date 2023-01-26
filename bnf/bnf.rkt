@@ -8,6 +8,7 @@
          (except-out (struct-out bnf-state)
                      -make-bnf-state)
          make-bnf-state
+         let*-bnf
          define-bnf)
 
 (define-struct (bnf-exn exn)
@@ -181,8 +182,8 @@
                (when (> (bytes-length buf) 0)
                  (raise (make-bnf-parser-not-exhausted-exn* state buf)))))))))))
 
-;; let-bnf is like let, but for bnf rules.
-(define-syntax (let-bnf stx)
+;; let*-bnf is like let, but for bnf rules.
+(define-syntax (let*-bnf stx)
   (syntax-case stx ()
     ((_ rules body)
      (syntax/loc stx (~bnf-parse-aux rules body)))))
@@ -194,7 +195,7 @@
 (define-syntax (define-bnf stx)
   (syntax-case stx ()
     ((_ name rules body)
-     (syntax/loc stx (define name (let-bnf rules body))))))
+     (syntax/loc stx (define name (let*-bnf rules body))))))
 
 
 
