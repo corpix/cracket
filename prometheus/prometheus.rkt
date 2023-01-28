@@ -3,15 +3,30 @@
          (for-syntax racket racket/syntax)
          web-server/http/response-structs)
 (provide (except-out (struct-out prometheus-registry) -make-prometheus-registry)
+         (except-out (struct-out prometheus-metric-counter) -make-prometheus-metric-counter)
+         (except-out (struct-out prometheus-metric-gauge) -make-prometheus-metric-gauge)
+         (except-out (struct-out prometheus-metric-histogram) -make-prometheus-metric-histogram)
          make-prometheus-registry
          current-prometheus-registry
          with-prometheus-registry
-         (struct-out prometheus-metric-counter)
-         (struct-out prometheus-metric-gauge)
-         (struct-out prometheus-metric-histogram)
+         make-prometheus-metric-counter
+         make-prometheus-metric-gauge
+         make-prometheus-metric-histogram
          prometheus-register!
          prometheus-unregister!
+         prometheus-set!
+         prometheus-reset!
+         prometheus-increment!
+         prometheus-decrement!
+         prometheus-observe!
          prometheus-ref
+         prometheus-metric-type
+         prometheus-metric-name
+         prometheus-metric-doc
+         prometheus-metric-labels
+         prometheus-metric-store
+         prometheus-metric-value
+         prometheus-metric-format
          prometheus-metrics-format
          prometheus-start-runtime-collector
          make-prometheus-http-handler)
@@ -69,8 +84,7 @@
     (string-append acc
                    (format "~a~a ~a\n"
                            name
-                           (prometheus-metric-labels-format
-                            (append labels value-labels))
+                           (prometheus-metric-labels-format (append labels value-labels))
                            value))))
 
 (define (prometheus-metrics-format #:registry (registry (current-prometheus-registry)))
@@ -108,6 +122,7 @@
   (prometheus-metric-doc prometheus-metric)
   (prometheus-metric-labels prometheus-metric)
   (prometheus-metric-store prometheus-metric)
+  (prometheus-metric-value prometheus-metric #:labels (labels))
   (prometheus-metric-format prometheus-metric #:namespace (namespace))
 
   (prometheus-set! prometheus-metric value #:labels (labels))
@@ -130,6 +145,8 @@
      (prometheus-metric-counter-labels metric))
    (define (prometheus-metric-store metric)
      (prometheus-metric-counter-store metric))
+   (define (prometheus-metric-value metric #:labels (labels null))
+     (hash-ref (prometheus-metric-counter-store metric) labels))
    (define (prometheus-metric-format metric #:namespace (namespace #f))
      (prometheus-metric-format-fields
       (prometheus-metric-format-name (prometheus-metric-name metric)
@@ -145,7 +162,9 @@
      (let ((store (prometheus-metric-counter-store metric)))
        (call-with-semaphore
         (prometheus-metric-counter-semaphore metric)
-        (thunk (hash-set! store labels (+ by (hash-ref store labels 0)))))))))
+        (thunk (let ((new-value (+ by (hash-ref store labels 0))))
+                 (begin0 new-value
+                   (hash-set! store labels new-value)))))))))
 
 ;;
 
@@ -161,6 +180,8 @@
      (prometheus-metric-gauge-labels metric))
    (define (prometheus-metric-store metric)
      (prometheus-metric-gauge-store metric))
+   (define (prometheus-metric-value metric #:labels (labels null))
+     (hash-ref (prometheus-metric-gauge-store metric) labels))
    (define (prometheus-metric-format metric #:namespace (namespace #f))
      (prometheus-metric-format-fields
       (prometheus-metric-format-name (prometheus-metric-name metric)
@@ -172,9 +193,10 @@
 
    (define (prometheus-set! metric value #:labels (labels null))
      (let ((store (prometheus-metric-gauge-store metric)))
-       (call-with-semaphore
-        (prometheus-metric-gauge-semaphore metric)
-        (thunk (hash-set! store labels value)))))
+       (begin0 value
+         (call-with-semaphore
+          (prometheus-metric-gauge-semaphore metric)
+          (thunk (hash-set! store labels value))))))
    (define (prometheus-reset! metric #:labels (labels null))
      (prometheus-set! metric 0 #:labels labels))
    (define (prometheus-increment! metric
@@ -183,7 +205,9 @@
      (let ((store (prometheus-metric-gauge-store metric)))
        (call-with-semaphore
         (prometheus-metric-gauge-semaphore metric)
-        (thunk (hash-set! store labels (+ by (hash-ref store labels 0)))))))
+        (thunk (let ((new-value (+ by (hash-ref store labels 0))))
+                 (begin0 new-value
+                   (hash-set! store labels new-value)))))))
    (define (prometheus-decrement! metric
                                   #:by (by -1)
                                   #:labels (labels null))
@@ -211,6 +235,8 @@
      (prometheus-metric-histogram-labels metric))
    (define (prometheus-metric-store metric)
      (prometheus-metric-histogram-store metric))
+   (define (prometheus-metric-value metric #:labels (labels null))
+     (hash-ref (prometheus-metric-histogram-store metric) labels))
    (define (prometheus-metric-format metric #:namespace (namespace #f))
      (let* ((name (prometheus-metric-format-name (prometheus-metric-name metric)
                                                  #:namespace namespace))
@@ -266,22 +292,23 @@
                                                     0 0)))
                                         (begin0 value
                                           (hash-set! store labels value))))))
-                 (set-prometheus-metric-histogram-store-value-sum!
-                  store-value
-                  (+ value
-                     (prometheus-metric-histogram-store-value-sum
-                      store-value)))
-                 (set-prometheus-metric-histogram-store-value-count!
-                  store-value
-                  (+ 1
-                     (prometheus-metric-histogram-store-value-count
-                      store-value)))
-                 (let ((store-value-buckets (prometheus-metric-histogram-store-value-buckets store-value)))
-                   (for ((upper-limit (in-vector buckets))
-                         (index (in-naturals)))
-                     (when (<= value upper-limit)
-                       (vector-set! store-value-buckets index
-                                    (+ 1 (vector-ref store-value-buckets index)))))))))))))
+                 (begin0 store-value
+                   (set-prometheus-metric-histogram-store-value-sum!
+                    store-value
+                    (+ value
+                       (prometheus-metric-histogram-store-value-sum
+                        store-value)))
+                   (set-prometheus-metric-histogram-store-value-count!
+                    store-value
+                    (+ 1
+                       (prometheus-metric-histogram-store-value-count
+                        store-value)))
+                   (let ((store-value-buckets (prometheus-metric-histogram-store-value-buckets store-value)))
+                     (for ((upper-limit (in-vector buckets))
+                           (index (in-naturals)))
+                       (when (<= value upper-limit)
+                         (vector-set! store-value-buckets index
+                                      (+ 1 (vector-ref store-value-buckets index))))))))))))))
 
 ;;
 
@@ -456,14 +483,14 @@
                    (let  ((gc-log (make-log-receiver (current-logger) 'debug 'GC))
                           (timer (lambda (t) (alarm-evt (+ (current-inexact-milliseconds) t))))
                           (gc-run (make-prometheus-metric-counter 'racket_runtime_gc_run))
+                          (gc-time-metric (make-prometheus-metric-gauge 'racket_runtime_gc_time))
                           (gc-code-amount-metric (make-prometheus-metric-gauge 'racket_runtime_gc_code_amount))
                           (gc-post-amount-metric (make-prometheus-metric-gauge 'racket_runtime_gc_post_amount))
                           (gc-post-admin-amount-metric (make-prometheus-metric-gauge 'racket_runtime_gc_post_admin_amount))
                           (gc-process-time-metric (make-prometheus-metric-gauge 'racket_runtime_gc_process_time))
-                          (gc-time-metric (make-prometheus-metric-gauge 'racket_runtime_gc_time))
                           (gc-current-milliseconds-metric (make-prometheus-metric-gauge 'racket_runtime_gc_current_milliseconds))
-                          (current-memory-use-metric (make-prometheus-metric-gauge 'racket_runtime_current_memory_use))
-                          (current-process-milliseconds-metric (make-prometheus-metric-gauge 'racket_runtime_current_process_milliseconds)))
+                          (current-memory-use-metric (make-prometheus-metric-gauge 'racket_runtime_memory_use))
+                          (current-process-milliseconds-metric (make-prometheus-metric-gauge 'racket_runtime_process_milliseconds)))
                      (for ((metric (list gc-run
                                          gc-code-amount-metric
                                          gc-post-amount-metric
