@@ -1,26 +1,25 @@
 #lang racket
-
-(provide (except-out (struct-out bnf-exn)
-                     -make-bnf-exn)
-         (except-out (struct-out bnf-parser-not-exhausted-exn)
-                     -make-bnf-parser-not-exhausted-exn)
+(provide (except-out (struct-out bnf-exn) -make-bnf-exn)
+         (except-out (struct-out bnf-parser-not-exhausted-exn) -make-bnf-parser-not-exhausted-exn)
          (struct-out bnf-node)
-         (except-out (struct-out bnf-state)
-                     -make-bnf-state)
+         bnf-node-collect
+         (except-out (struct-out bnf-state) -make-bnf-state)
          make-bnf-state
          let*-bnf
          define-bnf)
+
+;; FIXME: looks like there is a problem with + rule (error reporting is terrible when it does not matches)
 
 (define-struct (bnf-exn exn)
   (state buf rule)
   #:constructor-name -make-bnf-exn)
 
-(define make-bnf-exn*
+(define make-bnf-exn
   (case-lambda
     ((state buf rule)
-     (make-bnf-exn*
+     (make-bnf-exn
       state buf rule
-      (format "Failed to parse ~s with rule ~a at ~a."
+      (format "failed to parse ~s with rule ~a at ~a."
 	      (if buf (bytes->string/utf-8 buf) "")
 	      'body
 	      (bnf-state-pos state))
@@ -47,13 +46,26 @@
 ;;
 
 (define-struct bnf-node
-  (name rule match child)
+  (name rule value child)
   #:transparent)
+
+(define (bnf-node-collect node rule)
+  (let* ((acc (vector)))
+    (let loop ((current node))
+      (if (vector? current)
+          (for ((node (in-vector current)))
+            (loop node))
+          (begin
+            (when (eq? (bnf-node-name current) rule)
+              (set! acc (vector-append acc (vector current))))
+            (loop (bnf-node-child current)))))
+    acc))
 
 ;;
 
 (define-struct bnf-state (buf pos depth)
   #:constructor-name -make-bnf-state
+  #:transparent
   #:mutable)
 
 (define (make-bnf-state buf)
@@ -69,14 +81,14 @@
 
 (define (bnf-state-match! state name rule do-match)
   (let ((buf (bnf-state-buf state))
-        (match (do-match state)))
-    (and match
+        (value (do-match state)))
+    (and value
          (bnf-node
           name rule
           (subbytes buf 0
                     (- (bytes-length buf)
                        (bytes-length (bnf-state-buf state))))
-          match))))
+          value))))
 
 (define (bnf-state-commit! state n)
   (begin0 (subbytes (bnf-state-buf state) 0 n)
@@ -104,33 +116,33 @@
                           (let loop ((acc (vector)) (ms matchers))
                             (if (pair? ms)
                                 (let ((s (bytes->string/utf-8 (bnf-state-buf state)))
-                                      (match ((car ms) state)))
-                                  (and match (loop
-                                              (vector-append acc (vector match))
+                                      (value ((car ms) state)))
+                                  (and value (loop
+                                              (vector-append acc (vector value))
                                               (cdr ms))))
                                 acc)))))
          (lambda (state)
            (let* ((state-copy (struct-copy bnf-state state))
-                  (match (do-match state-copy)))
-             (begin0 match
-               (and match (bnf-state-load! state state-copy))))))))
+                  (value (do-match state-copy)))
+             (begin0 value
+               (and value (bnf-state-load! state state-copy))))))))
     ((_ (* rule))
      (syntax/loc stx
        (let ((do-match (~bnf-rule-aux rule)))
          (lambda (state)
            (let loop ((acc (vector)))
-             (let ((match (do-match state)))
-               (if match
-                   (loop (vector-append acc (vector match)))
+             (let ((value (do-match state)))
+               (if value
+                   (loop (vector-append acc (vector value)))
                    acc)))))))
     ((_ (+ rule))
      (syntax/loc stx
        (let ((do-match (~bnf-rule-aux rule)))
          (lambda (state)
            (let loop ((acc (vector)) (n 0))
-             (let ((match (do-match state)))
-               (if match
-                   (loop (vector-append acc (vector match)) (+ n 1))
+             (let ((value (do-match state)))
+               (if value
+                   (loop (vector-append acc (vector value)) (+ n 1))
                    (and (> n 0) acc))))))))
     ((_ (lambda (state) body ...))
      (syntax/loc stx (lambda (state) body ...)))
@@ -178,7 +190,7 @@
              ;; of such kind (non exhausting)
              (begin0 child
                (unless child
-                 (raise (make-bnf-exn* state buf 'body)))
+                 (raise (make-bnf-exn state buf 'body)))
                (when (> (bytes-length buf) 0)
                  (raise (make-bnf-parser-not-exhausted-exn* state buf)))))))))))
 
@@ -255,9 +267,9 @@
        'ty&ty '(and ty ty) (list->bytes '(116 101 115 116 121 111 117))
        (vector
         (bnf-node 'ty '(or t y) (list->bytes '(116 101 115 116))
-                     (bnf-node 't "test" (list->bytes '(116 101 115 116)) (vector)))
+                  (bnf-node 't "test" (list->bytes '(116 101 115 116)) (vector)))
         (bnf-node 'ty '(or t y) (list->bytes '(121 111 117))
-                     (bnf-node 'y "you" (list->bytes '(121 111 117)) (vector)))))))
+                  (bnf-node 'y "you" (list->bytes '(121 111 117)) (vector)))))))
     (check-equal?
      (booleans-test "youtest")
      (bnf-node
@@ -266,9 +278,9 @@
        'ty&ty '(and ty ty) (list->bytes '(121 111 117 116 101 115 116))
        (vector
         (bnf-node 'ty '(or t y) (list->bytes '(121 111 117))
-                     (bnf-node 'y "you" (list->bytes '(121 111 117)) (vector)))
+                  (bnf-node 'y "you" (list->bytes '(121 111 117)) (vector)))
         (bnf-node 'ty '(or t y) (list->bytes '(116 101 115 116))
-                     (bnf-node 't "test" (list->bytes '(116 101 115 116)) (vector)))))))
+                  (bnf-node 't "test" (list->bytes '(116 101 115 116)) (vector)))))))
 
     (check-equal?
      (booleans-test "testtest")
@@ -278,9 +290,9 @@
        'ty&ty '(and ty ty) (list->bytes '(116 101 115 116 116 101 115 116))
        (vector
         (bnf-node 'ty '(or t y) (list->bytes '(116 101 115 116))
-                     (bnf-node 't "test" (list->bytes '(116 101 115 116)) (vector)))
+                  (bnf-node 't "test" (list->bytes '(116 101 115 116)) (vector)))
         (bnf-node 'ty '(or t y) (list->bytes '(116 101 115 116))
-                     (bnf-node 't "test" (list->bytes '(116 101 115 116)) (vector)))))))
+                  (bnf-node 't "test" (list->bytes '(116 101 115 116)) (vector)))))))
     (check-equal?
      (booleans-test "youyou")
      (bnf-node
@@ -289,9 +301,9 @@
        'ty&ty '(and ty ty) (list->bytes '(121 111 117 121 111 117))
        (vector
         (bnf-node 'ty '(or t y) (list->bytes '(121 111 117))
-                     (bnf-node 'y "you" (list->bytes '(121 111 117)) (vector)))
+                  (bnf-node 'y "you" (list->bytes '(121 111 117)) (vector)))
         (bnf-node 'ty '(or t y) (list->bytes '(121 111 117))
-                     (bnf-node 'y "you" (list->bytes '(121 111 117)) (vector)))))))
+                  (bnf-node 'y "you" (list->bytes '(121 111 117)) (vector)))))))
     (check-exn bnf-parser-not-exhausted-exn? (thunk (booleans-test "testyoutest")))
     (check-exn bnf-exn? (thunk (booleans-test "y")))
     (check-exn bnf-exn? (thunk (booleans-test ""))))
@@ -357,4 +369,27 @@
        't+ '(+ t) (list->bytes '(116 101 115 116 116 101 115 116 116 101 115 116))
        (vector (bnf-node 't "test" (list->bytes '(116 101 115 116)) (vector))
                (bnf-node 't "test" (list->bytes '(116 101 115 116)) (vector))
-               (bnf-node 't "test" (list->bytes '(116 101 115 116)) (vector))))))))
+               (bnf-node 't "test" (list->bytes '(116 101 115 116)) (vector)))))))
+
+  ;;
+
+  (test-case "bnf-node-collect"
+    (define-bnf repeat+-test
+      ((t "test")
+       (n (or "1" "2" "3"))
+       (t+ (+ (and (+ t) n))))
+      t+)
+
+    (check-equal?
+     (bnf-node-collect (repeat+-test "test1testtest2test3") 't)
+     (vector
+      (bnf-node 't "test" #"test" '#())
+      (bnf-node 't "test" #"test" '#())
+      (bnf-node 't "test" #"test" '#())
+      (bnf-node 't "test" #"test" '#())))
+    (check-equal?
+     (bnf-node-collect (repeat+-test "test1testtest2test3") 'n)
+     (vector
+      (bnf-node 'n '(or "1" "2" "3") #"1" '#())
+      (bnf-node 'n '(or "1" "2" "3") #"2" '#())
+      (bnf-node 'n '(or "1" "2" "3") #"3" '#())))))
