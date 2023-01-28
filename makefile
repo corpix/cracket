@@ -12,7 +12,9 @@ install:
 	$(racoinstall) -n corpix-multipart  file://$(PWD)/multipart
 	$(racoinstall) -n corpix-http       file://$(PWD)/http
 	$(racoinstall) -n corpix-telegram   file://$(PWD)/telegram
+	$(racoinstall) -n corpix-task       file://$(PWD)/task
 	$(racoinstall) -n corpix-bnf        file://$(PWD)/bnf
+	$(racoinstall) -n corpix-time       file://$(PWD)/time
 
 .PHONY: uninstall
 uninstall:
@@ -24,7 +26,9 @@ uninstall:
 	-$(racouninstall) corpix-multipart
 	-$(racouninstall) corpix-http
 	-$(racouninstall) corpix-telegram
+	-$(racouninstall) corpix-task
 	-$(racouninstall) corpix-bnf
+	-$(racouninstall) corpix-time
 
 .PHONY: reinstall
 reinstall: uninstall install
