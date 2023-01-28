@@ -7,36 +7,25 @@
          "syntax.rkt")
 (provide define-task
          define-task-runner
-         command
-         run-factory
-         run-shell
-         run-git
-         run-isolate
-         factory
-         shell
-         git
-         isolate
          task-expand
          task-run)
 (module+ test
   (require rackunit))
 
-(define current-shell-executable (make-parameter "bash"))
-(define current-task-runners (make-parameter (make-hasheq)))
+
+(define current-tasks-parameters (make-parameter (make-immutable-hasheq)))
 (define current-task (make-parameter #f))
+(define-for-syntax current-task-transformers (make-parameter (make-hasheq)))
+(define current-task-runners (make-parameter (make-hasheq)))
 (define current-isolation-methods (make-parameter (make-hasheq)))
 (define current-logger (make-parameter displayln))
+(define current-shell-executable (make-parameter "bash"))
 
 ;;
 
 (define (command executable . arguments)
-  (let-values (((p out in err)
-                ;; FIXME: ports are block-buffered
-                ;; bad news is we can't change this easily
-                ;; good news is we could use files where we could control the reader buffer
-                ;; also files will allow us to collect some raw logs which is kinda useful
-                ;; but needs a way to return this (maybe each runner could set some meta information for task result?)
-                (apply subprocess #f #f #f (find-executable-path executable)
+  (match-let (((list out in pid err control)
+                (apply process* (find-executable-path executable)
                        arguments)))
     (close-output-port in)
     (let* ((logger (current-logger))
@@ -45,9 +34,9 @@
                                            (for ((line (in-lines port)))
                                              (logger line)))))))
                  evt)))
-      (subprocess-wait p)
+      (control 'wait)
       (dynamic-wind void
-                    (thunk (let ((code (subprocess-status p)))
+                    (thunk (let ((code (control 'exit-code)))
                              (when (not (= code 0))
                                (error (format "shell command '~a' exited with ~a code, err: ~a"
                                               (append (list executable) arguments) code
@@ -78,66 +67,85 @@
 ;;
 
 (define-struct task
-  (name runner body)
-  #:prefab)
+  (name body)
+  #:prefab
+  #:constructor-name make-task)
 
-(define-syntax (define-task stx)
+(define-syntax (define-task-transformer stx)
   (syntax-parse stx
-    ((_ (name argument ... . rest) body ...)
+    ((_ (name stx-sym) body ...)
      (syntax/loc stx
-       (define-syntax (name stx)
-         (syntax-parse stx
-           ((_ argument ... . rest)
-            (syntax/loc stx (begin body ...)))))))))
+       (begin-for-syntax
+         (hash-set! (current-task-transformers) 'name
+                    (lambda (stx-sym) (syntax-parse stx-sym body ...))))))))
 
 (define-syntax (define-task-runner stx)
   (syntax-parse stx
-    ((_ (name arguments ... . rest) body ...)
+    ((_ (name argument ... . rest) body ...)
+     (syntax/loc stx
+       (hash-set! (current-task-runners) 'name
+                  (lambda (argument ... . rest) body ...))))))
+
+(define-syntax (define-task stx)
+  (syntax-parse stx
+    #:datum-literals (transformer runner)
+    ((_ name
+        (transformer ((transformer-argument ... . transformer-rest) transformer-template) ...)
+        (runner (runner-argument ... . runner-rest) runner-body ...))
      (syntax/loc stx
        (begin
-         (define (name arguments ... . rest) body ...)
-         (hash-set! (current-task-runners) 'name name))))))
+         (define-task-transformer (name stx-sym)
+           ((_ transformer-argument ... . rest)
+            (syntax/loc stx-sym transformer-template)) ...)
+         (define-task-runner (name runner-argument ... . runner-rest)
+           runner-body ...))))))
 
-;;
+(define-syntax (parameterize-tasks-defaults stx)
+  (syntax-parse stx
+    ((_ ((parameter-name:id parameter-value) ...) body ...)
+     (syntax/loc stx
+       (let* ((default (gensym))
+              (parameters (current-tasks-parameters)))
+         (parameterize ((current-tasks-parameters
+                         (for/fold ((parameters (current-tasks-parameters)))
+                                   ((name (in-list (list 'parameter-name ...)))
+                                    (value (in-list (list parameter-value ...))))
+                           (if (eq? (hash-ref parameters name default) default)
+                               (hash-set parameters name value)
+                               parameters))))
+           (let ((parameter-name (hash-ref (current-tasks-parameters) 'parameter-name)) ...)
+             body ...)))))))
 
-(define-task-runner (run-factory task . arguments)
-  (apply (task-body task) arguments))
+(define-syntax (parameterize-tasks stx)
+  (syntax-parse stx
+    ((_ ((parameter-name:id parameter-value) ...) body ...)
+     (syntax/loc stx
+       (let* ((parameters (current-tasks-parameters)))
+         (parameterize ((current-tasks-parameters
+                         (for/fold ((parameters (current-tasks-parameters)))
+                                   ((name (in-list (list 'parameter-name ...)))
+                                    (value (in-list (list parameter-value ...))))
+                           (hash-set parameters name value))))
+           (let ((parameter-name (hash-ref (current-tasks-parameters) 'parameter-name)) ...)
+             body ...)))))))
 
-(define-task-runner (run-shell #:interpreter (interpreter "bash")
-                               #:interpreter-arguments (interpreter-arguments '("-e"))
-                               #:filename (filename #f)
-                               task)
-  (let ((body (car (task-body task)))
-        (body-file (make-temporary-file)))
-    (dynamic-wind
-      (lambda () (file-or-directory-permissions body-file #o600))
-      (lambda ()
-        (with-output-to-file
-          body-file
-          (lambda () (write-string body))
-          #:exists 'truncate)
-        (let ((previous-logger (current-logger))
-              (logger-prefix (or filename body)))
-          (parameterize ((current-logger (lambda (str)
-                                           (previous-logger
-                                            (string-append logger-prefix ": " str)))))
-            (apply command
-                   (append (cons interpreter interpreter-arguments)
-                           (list body-file))))))
-      (lambda () (delete-file body-file)))))
 
-(define-task-runner (run-git task)
-  (apply command "git" (task-body task)))
+(define-syntax (task-expression-expand stx)
+  (syntax-parse stx
+    #:datum-literals (format parameter)
+    ((_ (format rest ...))
+     (syntax/loc stx (format rest ...)))
+    ((_ (parameter name:id))
+     (syntax/loc stx (hash-ref (current-tasks-parameters) 'name)))
+    ((_ expr) #'expr)))
 
-(define-task-runner (run-isolate task)
-  (let* ((arguments (task-body task))
-         (name (car arguments))
-         (inner-task (cadr arguments))
-         (isolation-arguments (caddr arguments))
-         (isolation-command-maker
-          (or (hash-ref (current-isolation-methods) name #f)
-              (error (format "isolation method is not defined: ~s" name)))))
-    (apply command (isolation-command-maker inner-task isolation-arguments))))
+(define-syntax (task-expand stx)
+  (syntax-parse stx
+    ((_ (task argument ...))
+     (let* ((name (syntax->datum #'task))
+            (transform (or (hash-ref (current-task-transformers) name #f)
+                           (error (format "no task transformer defined for task name ~s" name)))))
+       (transform #'(task argument ...))))))
 
 ;;
 
@@ -155,11 +163,10 @@
     (append (list (find-executable-path "racket"))
             (alist->shell-arguments (append
                                      `((lib "racket")
-                                       (lib "racket/serialize")
                                        (require ,current-file))
                                      arguments
                                      `((eval ,(let ((buf (open-output-string)))
-                                                (write `(task-run (deserialize ',(serialize task))) buf)
+                                                (write `(task-run ',task) buf)
                                                 (get-output-string buf)))))))))
 
 (define-isolation-method (bwrap task (arguments null))
@@ -184,38 +191,92 @@
 
 ;;
 
-(define-task (factory (arguments ...) body)
-  (make-task 'factory 'run-factory
-             (lambda (arguments ...) body)))
+(define-task shell
+  (transformer ((command:str)
+                (make-task 'shell (list command))))
+  (runner (task)
+          (parameterize-tasks-defaults
+           ((interpreter "bash")
+            (interpreter-arguments '("-e"))
+            (filename #f))
 
-(define-task (shell command)
-  (make-task 'shell 'run-shell
-             (list command)))
+           (let ((body (car (task-body task)))
+                 (body-file (make-temporary-file)))
+             (dynamic-wind
+               (lambda () (file-or-directory-permissions body-file #o600))
+               (lambda ()
+                 (with-output-to-file
+                   body-file
+                   (lambda () (write-string body))
+                   #:exists 'truncate)
+                 (let ((previous-logger (current-logger))
+                       (logger-prefix (or filename body)))
+                   (parameterize ((current-logger (lambda (str)
+                                                    (previous-logger
+                                                     (string-append logger-prefix ": " str)))))
+                     (apply command
+                            (append (cons interpreter interpreter-arguments)
+                                    (list body-file))))))
+               (lambda () (delete-file body-file)))))))
 
-(define-task (git action . body)
-  (make-task 'git 'run-git
-             (cons action body)))
+(define-task git
+  (transformer ((action . body)
+                (make-task 'git (cons action 'body))))
+  (runner (task)
+          (apply command "git" (task-body task))))
 
-(define-task (isolate isolation task arguments ...)
-  (make-task 'isolate 'run-isolate
-             (list isolation task '(arguments ...))))
+(define-task isolate
+  (transformer ((isolation task arguments ...)
+                (make-task 'isolate (list isolation (task-expand task) '(arguments ...)))))
+  (runner (task)
+          (let* ((arguments (task-body task))
+                 (name (car arguments))
+                 (inner-task (cadr arguments))
+                 (isolation-arguments (caddr arguments))
+                 (isolation-command-maker
+                  (or (hash-ref (current-isolation-methods) name #f)
+                      (error (format "isolation method is not defined: ~s" name)))))
+            (apply command (isolation-command-maker inner-task isolation-arguments)))))
+
+(define-task sequential
+  (transformer ((task ...)
+                (make-task 'sequential (list (task-expand task) ...))))
+  (runner (task)
+          (for ((sub-task (task-body task)))
+            (task-run sub-task))))
+
+(define-task concurrent
+  (transformer ((task ...)
+                (make-task 'concurrent (list (task-expand task) ...))))
+  (runner (task)
+          (for ((job (in-list (for/list ((sub-task (task-body task)))
+                                (thread (thunk (task-run sub-task)))))))
+            (sync job))))
 
 ;;
 
-(define-syntax (task-expand stx) null)
-
 (define (task-run task . arguments)
-  (parameterize ((current-task task))
-    (let loop ((task task)
-               (arguments arguments))
-      (set! task
-        (apply (hash-ref (current-task-runners) (task-runner task))
-               task
-               arguments))
-      (when (task? task) ;; NOTE: reduce task, but omit arguments (they are valid only on first pass)
-        (loop task null)))))
+  (parameterize ((current-task task)
+                 (current-tasks-parameters (for/fold ((parameters (current-tasks-parameters)))
+                                                     ((argument (in-list arguments)))
+                                             (hash-set parameters
+                                                       (car argument)
+                                                       (cadr argument)))))
+    (apply (hash-ref (current-task-runners) (task-name task))
+           (list task))))
 
 (module+ test
-  (task-run (factory (cmd)
-                     (isolate 'raw (shell cmd)))
-            "whoami"))
+  (task-run (task-expand
+             (sequential (shell "whoami")
+                         (shell "uname -a"))) ;; => '#s(task sequential (#s(task shell ("whoami")) #s(task shell ("uname -a"))))
+            ) ;; => whoami: user
+              ;; => uname -a: Linux ran 6.1.3 #1-NixOS SMP PREEMPT_DYNAMIC Wed Jan  4 10:29:02 UTC 2023 x86_64 GNU/Linux
+
+  (task-run (task-expand (concurrent (shell "date && sleep 1 && date")
+                                     (shell "date && sleep 1 && date")
+                                     (shell "date && sleep 1 && date")
+                                     (shell "date && sleep 1 && date")
+                                     (shell "date && sleep 1 && date")
+                                     (shell "for x in $(seq 1 10); do echo $x; sleep 1; done"))))
+  ;;(task-run (task-expand (isolate 'raw (shell "whoami"))))
+  )
