@@ -1,5 +1,6 @@
 #lang racket
-(require net/ip
+(require racket/os
+         net/ip
          corpix/bnf
          corpix/time
          corpix/hex
@@ -8,18 +9,19 @@
   (require rackunit))
 
 (define current-logger (make-parameter displayln))
+(define (log message)
+  ((current-logger) message))
 
 (define (command executable . arguments)
   (match-let (((list out in pid err control)
                (apply process* (find-executable-path executable)
                       arguments)))
     (close-output-port in)
-    (let* ((logger (current-logger))
-           (io (for/list ((evt (for/list ((port (list out err)))
+    (let* ((io (for/list ((evt (for/list ((port (list out err)))
                                  (thread (lambda ()
                                            (for ((line (in-lines port)))
                                              (when (> (string-length line) 0)
-                                               (logger line))))))))
+                                               (log line))))))))
                  evt)))
       (control 'wait)
       (dynamic-wind void
@@ -111,10 +113,17 @@
        #'((id) (in-producer
                 (let ((p* p) (mode* mode))
                   (check-in-firewall-lines p* mode*)
-                  (lambda () (let ((line (read-line p* mode*)))
-                               (if (eof-object? line)
-                                   line
-                                   (firewall-fold-line (firewall-parse-line line))))))
+                  (lambda ()
+                    (let next ()
+                      (let ((line (read-line p* mode*)))
+                        (with-handlers ((exn? (lambda (exn)
+                                                (log (format
+                                                      "got an exception ~s while handling line ~s"
+                                                      exn line))
+                                                (next))))
+                          (if (eof-object? line)
+                              line
+                              (firewall-fold-line (firewall-parse-line line))))))))
                 eof)))
       (_ #f))))
 
@@ -122,7 +131,7 @@
 
 (define (worker port)
   (let ((by-ip (make-prometheus-metric-counter 'firewall_refused_ip))
-        (by-ip-label-names (set "DPT" "DST" "IN" "MAC" "OUT" "PROTO" "SPT" "SRC" "TOS"))
+        (by-ip-label-names (set "DPT" "DST" "IN" "MAC" "OUT" "PROTO" "SRC" "TOS"))
         (by-ip-limit 20)
         (by-ip-port (make-prometheus-metric-counter 'firewall_refused_ip_port))
         (by-ip-port-label-names (set "DST" "IN" "MAC" "OUT" "PROTO" "SRC" "TOS"))
@@ -130,7 +139,7 @@
     (prometheus-register! by-ip)
     (prometheus-register! by-ip-port)
     (prometheus-register! banned)
-    (for ((refused (in-firewall-lines out)))
+    (for ((refused (in-firewall-lines port)))
       (let* ((fields (firewall-refused-fields refused))
              (by-ip-labels (filter (lambda (field) (set-member? by-ip-label-names (car field)))
                                    (hash->list fields)))
@@ -138,21 +147,75 @@
                                         (hash->list fields)))
              (by-ip-value (begin0 (prometheus-increment! by-ip #:labels by-ip-labels)
                             (prometheus-increment! by-ip-port #:labels by-ip-port-labels))))
-        (when (> by-ip-value by-ip-limit)
-          (command (if (= (ip-address-version (make-ip-address (hash-ref fields "SRC"))) 4)
-                       "iptables"
-                       "ip6tables")
-                   "-I" "INPUT"
-                   "-p" (symbol->string (hash-ref fields "PROTO"))
-                   "-j" "DROP")
-          (prometheus-increment! banned #:labels by-ip-labels))))))
+        (when (and (> by-ip-value by-ip-limit)
+                   (not (prometheus-metric-value banned #f #:labels by-ip-labels)))
+          (let ((proto (symbol->string (hash-ref fields "PROTO")))
+                (in (symbol->string (hash-ref fields "IN")))
+                (ip (hash-ref fields "SRC")))
+            (command (if (= (ip-address-version (make-ip-address (hash-ref fields "SRC"))) 4)
+                         "iptables"
+                         "ip6tables")
+                     "-I" "INPUT"
+                     "-p" proto
+                     "-i" in
+                     "--src" ip
+                     "-j" "DROP")
+            (prometheus-increment! banned #:labels by-ip-labels)
+            (log (format "banned protocol ~s in interface ~s for ip ~s" proto in ip))))))))
 
 ;;
 
-;; (match-define (list out in _ err control)
-;;   (process* "./stub"))
-;; (close-output-port in)
-;; (close-input-port err)
-;; (worker out)
-;; (displayln (prometheus-metrics-format))
-;; (close-input-port out)
+(define (main)
+  (match-define (list out in _ err control)
+    (process* (find-executable-path "journalctl") "-k" "--follow"))
+  (close-output-port in)
+  (void
+   (thread (thunk (for ((line (in-lines err)))
+                    (displayln line)))))
+  (void
+   (thread (thunk (let loop ()
+                    (displayln (prometheus-metrics-format))
+                    (sleep 10)
+                    (loop)))))
+  (worker out)
+  (control 'wait)
+  (close-input-port out)
+  (close-input-port err))
+
+;;
+
+(define-bnf getpcaps-parse-line
+  ((space " ")
+   (colon ":")
+   (comma ",")
+   (eq "=")
+   (spaces (+ space))
+   (alpha-lower (or "q" "w" "e" "r" "t" "y" "u" "i" "o" "p" "a" "s" "d" "f" "g" "h" "j" "k" "l" "z" "x" "c" "v" "b" "n" "m"))
+   (alpha-upper (or "Q" "W" "E" "R" "T" "Y" "U" "I" "O" "P" "A" "S" "D" "F" "G" "H" "J" "K" "L" "Z" "X" "C" "V" "B" "N" "M"))
+   (alpha (or alpha-lower alpha-upper))
+   (number (or "1" "2" "3" "4" "5" "6" "7" "8" "9" "0"))
+   (capability (+ (or alpha number "_" "+")))
+   (capabilities (* (and capability (* comma))))
+   (prefix (and (+ number) colon space eq (* space)))
+   (line (and prefix capabilities)))
+  line)
+
+(define (preflight)
+  (match-define (list out in _ err control)
+    (process* (find-executable-path "getpcaps") (number->string (getpid))))
+  (close-output-port in)
+  (for/list ((line (in-lines out)))
+    (unless (vector-member "cap_net_admin"
+                           (vector-map bnf-node-value
+                                       (bnf-node-collect
+                                        (getpcaps-parse-line line)
+                                        'capability)))
+      (error "current process can not modify firewall because cap_net_admin is not set, use init system to fix this")))
+  (control 'wait)
+  (close-input-port out)
+  (close-input-port err))
+
+;;
+
+(preflight)
+(main)
