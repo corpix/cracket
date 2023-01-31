@@ -1,5 +1,0 @@
-#!/usr/bin/env bash
-
-for x in $(seq 1 25); do
-echo 'Jan 25 18:26:09 athena kernel: refused packet: IN=eth0 OUT= MAC=f2:3c:91:a6:ce:ce:00:00:0c:9f:f0:03:08:00 SRC=91.108.17.2 DST=139.162.174.251 LEN=120 TOS=0x08 PREC=0x20 TTL=51 ID=64137 DF PROTO=UDP SPT=1400 DPT=58320 LEN=100'
-done
