@@ -16,6 +16,7 @@ install:
 	$(racoinstall) -n corpix-bnf        file://$(PWD)/bnf
 	$(racoinstall) -n corpix-time       file://$(PWD)/time
 
+	$(racoinstall) -n corpix-taskd      file://$(PWD)/taskd
 	$(racoinstall) -n corpix-firewalld  file://$(PWD)/firewalld
 
 .PHONY: uninstall
@@ -32,6 +33,7 @@ uninstall:
 	-$(racouninstall) corpix-bnf
 	-$(racouninstall) corpix-time
 
+	-$(racouninstall) corpix-taskd
 	-$(racouninstall) corpix-firewalld
 
 .PHONY: reinstall
