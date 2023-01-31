@@ -204,13 +204,15 @@
   (match-define (list out in _ err control)
     (process* (find-executable-path "getpcaps") (number->string (getpid))))
   (close-output-port in)
-  (for/list ((line (in-lines out)))
-    (unless (vector-member "cap_net_admin"
+  (for ((line (in-lines out)))
+    (and
+     (> (string-length line) 0)
+     (unless (vector-member "cap_net_admin"
                            (vector-map bnf-node-value
                                        (bnf-node-collect
                                         (getpcaps-parse-line line)
                                         'capability)))
-      (error "current process can not modify firewall because cap_net_admin is not set, use init system to fix this")))
+      (error "current process can not modify firewall because cap_net_admin is not set, use init system to fix this"))))
   (control 'wait)
   (close-input-port out)
   (close-input-port err))
