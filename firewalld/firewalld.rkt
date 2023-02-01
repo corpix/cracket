@@ -209,7 +209,7 @@
     (log (list 'getpcaps line))
     (and
      (> (string-length line) 0)
-     (unless (vector-member "cap_net_admin"
+     (unless (vector-member #"cap_net_admin"
                             (vector-map bnf-node-value
                                         (bnf-node-collect
                                          (getpcaps-parse-line line)
@@ -232,7 +232,14 @@
                  (bnf-node-collect
                   (getpcaps-parse-line "402438: cap_net_admin")
                   'capability))
-     (vector #"cap_net_admin"))))
+     (vector #"cap_net_admin"))
+    (check-true
+     (and (vector-member #"cap_net_admin"
+                    (vector-map bnf-node-value
+                                (bnf-node-collect
+                                 (getpcaps-parse-line "402438: cap_net_admin")
+                                 'capability)))
+          #t))))
 
 ;;
 
