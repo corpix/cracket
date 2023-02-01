@@ -196,8 +196,8 @@
    (number (or "1" "2" "3" "4" "5" "6" "7" "8" "9" "0"))
    (flags (+ (or "=" "+" "e" "i" "p")))
    (capability (+ (or alpha number "_")))
-   (capabilities (* (and capability (* flags) (* comma))))
-   (prefix (and (+ number) colon space eq (* space)))
+   (capabilities (* (and (or capability flags) (* flags) (* comma))))
+   (prefix (and (+ number) colon (* space)))
    (line (and prefix capabilities)))
   line)
 
@@ -206,7 +206,7 @@
     (process* (find-executable-path "getpcaps") (number->string (getpid))))
   (close-output-port in)
   (for ((line (in-lines out)))
-    (displayln line)
+    (log (list 'getpcaps line))
     (and
      (> (string-length line) 0)
      (unless (vector-member "cap_net_admin"
@@ -218,6 +218,17 @@
   (control 'wait)
   (close-input-port out)
   (close-input-port err))
+
+(module+ test
+  (test-case "getpcaps-parse-line"
+    ;; TODO: more extensive tests
+    ;; for now it should just check that parser is fine with lines like this
+    (void (bnf-node-collect
+           (getpcaps-parse-line "402438: =")
+           'capability))
+    (void (bnf-node-collect
+           (getpcaps-parse-line "402438: cap_net_admin")
+           'capability))))
 
 ;;
 
