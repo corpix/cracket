@@ -16,6 +16,7 @@
          prometheus-unregister!
          prometheus-set!
          prometheus-reset!
+         prometheus-erase!
          prometheus-increment!
          prometheus-decrement!
          prometheus-observe!
@@ -127,6 +128,7 @@
 
   (prometheus-set! prometheus-metric value #:labels (labels))
   (prometheus-reset! prometheus-metric #:labels (labels))
+  (prometheus-erase! prometheus-metric #:labels (labels))
   (prometheus-increment! prometheus-metric #:by (by) #:labels (labels))
   (prometheus-decrement! prometheus-metric #:by (by) #:labels (labels))
   (prometheus-observe! prometheus-metric value #:labels (labels)))
@@ -156,6 +158,11 @@
       (prometheus-metric-labels metric)
       (prometheus-metric-store metric)))
 
+   (define (prometheus-erase! metric #:labels (labels null))
+     (let ((store (prometheus-metric-counter-store metric)))
+       (call-with-semaphore
+        (prometheus-metric-counter-semaphore metric)
+        (thunk (hash-remove! store labels)))))
    (define (prometheus-increment! metric
                                   #:by (by 1)
                                   #:labels (labels null))
@@ -199,6 +206,11 @@
           (thunk (hash-set! store labels value))))))
    (define (prometheus-reset! metric #:labels (labels null))
      (prometheus-set! metric 0 #:labels labels))
+   (define (prometheus-erase! metric #:labels (labels null))
+     (let ((store (prometheus-metric-gauge-store metric)))
+       (call-with-semaphore
+        (prometheus-metric-gauge-semaphore metric)
+        (thunk (hash-remove! store labels)))))
    (define (prometheus-increment! metric
                                   #:by (by 1)
                                   #:labels (labels null))
@@ -279,7 +291,11 @@
                                            (number->string le))))
                              metric-labels))
                       bucket-value)))))))
-
+   (define (prometheus-erase! metric #:labels (labels null))
+     (let ((store (prometheus-metric-histogram-store metric)))
+       (call-with-semaphore
+        (prometheus-metric-histogram-semaphore metric)
+        (thunk (hash-remove! store labels)))))
    (define (prometheus-observe! metric value
                                 #:labels (labels null))
      (let ((store (prometheus-metric-histogram-store metric))
@@ -378,6 +394,23 @@
       (let ((metric (make-prometheus-metric-counter 'foo)))
         (prometheus-register! metric)
         (check-equal? (prometheus-ref 'foo) metric))))
+  (test-case "prometheus-erase!"
+    (parameterize ((current-prometheus-registry (make-prometheus-registry)))
+      (let ((counter (make-prometheus-metric-counter 'foo #:doc "test"))
+            (gauge (make-prometheus-metric-gauge 'bar #:doc "test"))
+            (histogram (make-prometheus-metric-histogram 'baz #:doc "test")))
+        (begin (prometheus-register! counter)
+               (prometheus-increment! counter #:labels '((c . d)))
+               (prometheus-erase! counter #:labels '((c . d)))
+               (check-equal? (prometheus-metric-value counter #:labels '((c . d))) #f))
+        (begin (prometheus-register! gauge)
+               (prometheus-increment! gauge #:labels '((c . d)))
+               (prometheus-erase! gauge #:labels '((c . d)))
+               (check-equal? (prometheus-metric-value gauge #:labels '((c . d))) #f))
+        (begin (prometheus-register! histogram)
+               (prometheus-observe! histogram 1 #:labels '((c . d)))
+               (prometheus-erase! histogram #:labels '((c . d)))
+               (check-equal? (prometheus-metric-value histogram #:labels '((c . d))) #f)))))
   (test-case "prometheus-unregister!"
     (parameterize ((current-prometheus-registry (make-prometheus-registry)))
       (let ((metric (make-prometheus-metric-counter 'foo)))
