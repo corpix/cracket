@@ -205,6 +205,7 @@
     (process* (find-executable-path "getpcaps") (number->string (getpid))))
   (close-output-port in)
   (for ((line (in-lines out)))
+    (displayln line)
     (and
      (> (string-length line) 0)
      (unless (vector-member "cap_net_admin"
