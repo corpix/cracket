@@ -14,6 +14,10 @@
 
 (define current-http-address (make-parameter "127.0.0.1"))
 (define current-http-port (make-parameter 5634))
+(define current-by-ip-limit (make-parameter 20))
+(define current-ttl (make-parameter (hour-duration 2)))
+(define current-ttl-timer (make-parameter 60))
+(define current-firewall (make-parameter 'iptables))
 
 (define-bnf firewall-parse-line
   ((space " ")
@@ -63,9 +67,14 @@
 
 ;;
 
-(define current-logger (make-parameter displayln))
+(define current-logger (make-parameter
+                        (lambda (msg)
+                          (displayln msg)
+                          (flush-output))))
 (define (log message)
   ((current-logger) message))
+
+;;
 
 (define (command executable . arguments)
   (match-let (((list out in pid err control)
@@ -91,6 +100,28 @@
                              (sync port))
                            (close-input-port out)
                            (close-input-port err))))))
+;;
+
+(define (make-firewall-iptables)
+  (lambda (fields proto in ip)
+    (command (if (= (ip-address-version (make-ip-address (hash-ref fields "SRC"))) 4)
+                 "iptables"
+                 "ip6tables")
+             "-I" "INPUT"
+             "-p" proto
+             "-i" in
+             "--src" ip
+             "-j" "DROP")))
+
+(define (make-firewall-dummy)
+  (lambda (fields proto in ip)
+    (log (format "dummy firewall fields ~a, proto ~a, in ~a, ip ~a"
+                 fields proto in ip))))
+
+(define current-firewalls
+  (make-parameter (make-hasheq `((iptables . ,(make-firewall-iptables))
+                                 (dummy . ,(make-firewall-dummy))))))
+
 ;;
 
 (define-struct firewall-refused
@@ -157,14 +188,30 @@
 ;;
 
 (define (worker port)
-  (let ((by-ip (make-prometheus-metric-counter 'firewall_refused_ip))
-        (by-ip-label-names (set "DPT" "DST" "IN" "MAC" "OUT" "PROTO" "SRC" "TOS"))
-        (by-ip-limit 20)
-        (by-ip-port (make-prometheus-metric-counter 'firewall_refused_ip_port))
-        (by-ip-port-label-names (set "DST" "IN" "MAC" "OUT" "PROTO" "SRC" "TOS"))
-        (banned (make-prometheus-metric-counter 'firewall_refused_ip_banned)))
+  (let* ((by-ip (make-prometheus-metric-counter 'firewall_refused_ip))
+         (by-ip-label-names (set "DPT" "DST" "IN" "MAC" "OUT" "PROTO" "SRC" "TOS"))
+         (by-ip-limit (current-by-ip-limit))
+         (banned (make-prometheus-metric-counter 'firewall_refused_ip_banned))
+         (ttl (make-hasheq))
+         (expire (vector))
+         (sem (make-semaphore 1))
+         (done (make-semaphore 0))
+         (cleaner (thread (thunk ;; stat record expiration worker
+                           (let loop ((time (current-time)))
+                             (call-with-semaphore
+                              sem
+                              (thunk
+                               (for ((to-expire (in-vector expire))
+                                     (n (in-naturals)))
+                                 #:break (and (time>? (car to-expire) time)
+                                              (begin0 #t (set! expire (vector-drop expire n))))
+                                 (log (format "expiring stat record ~a, ttl ~a > ~a" (cdr to-expire) time (car to-expire)))
+                                 (prometheus-erase! by-ip #:labels (cdr to-expire))
+                                 (hash-remove! ttl (cdr to-expire)))))
+                             (sleep (current-ttl-timer))
+                             (or (semaphore-try-wait? done)
+                                 (loop (current-time))))))))
     (prometheus-register! by-ip)
-    (prometheus-register! by-ip-port)
     (prometheus-register! banned)
     (for ((refused (in-firewall-lines port)))
       (let* ((fields (firewall-refused-fields refused))
@@ -172,27 +219,26 @@
                                      (and (set-member? by-ip-label-names (car field))
                                           (cdr field)))
                                    (hash->list fields)))
-             (by-ip-port-labels (filter (lambda (field)
-                                          (and (set-member? by-ip-port-label-names (car field))
-                                               (cdr field)))
-                                        (hash->list fields)))
-             (by-ip-value (begin0 (prometheus-increment! by-ip #:labels by-ip-labels)
-                            (prometheus-increment! by-ip-port #:labels by-ip-port-labels))))
+             (by-ip-value (let ((value (prometheus-increment! by-ip #:labels by-ip-labels)))
+                            (call-with-semaphore
+                             sem
+                             (thunk
+                              (let ((time (current-time)))
+                                (hash-set! ttl by-ip-labels time)
+                                (set! expire (vector-append expire (vector (cons time by-ip-labels)))))))
+                            value)))
         (when (and (> by-ip-value by-ip-limit)
                    (not (prometheus-metric-value banned #f #:labels by-ip-labels)))
           (let ((proto (symbol->string (hash-ref fields "PROTO")))
                 (in (symbol->string (hash-ref fields "IN")))
                 (ip (hash-ref fields "SRC")))
-            (command (if (= (ip-address-version (make-ip-address (hash-ref fields "SRC"))) 4)
-                         "iptables"
-                         "ip6tables")
-                     "-I" "INPUT"
-                     "-p" proto
-                     "-i" in
-                     "--src" ip
-                     "-j" "DROP")
             (prometheus-increment! banned #:labels by-ip-labels)
-            (log (format "banned protocol ~s in interface ~s for ip ~s" proto in ip))))))))
+            (log (format "about to ban incoming protocol ~s packets from ip ~s for interface ~s" proto ip in))
+            ((hash-ref (current-firewalls) (current-firewall))
+             fields proto in ip)))))
+    (log "worker is finished internal job processing loop")
+    (semaphore-post done)
+    (void (thread-wait cleaner))))
 
 ;;
 
@@ -260,6 +306,22 @@
 ;;
 
 (module+ test
+  (test-case "worker"
+    (check-equal?
+     (parameterize ((current-firewall 'dummy)
+                    (current-by-ip-limit 1)
+                    (current-ttl-timer 1)
+                    (current-logger void))
+       (let ((log-lines (string-join (list
+                                      "Jan 27 13:04:22 test kernel: refused packet: IN=eth0 OUT= MAC=00:00:00:00:00:00:00:00:00:00:00:00:00:00 SRC=40.99.214.34 DST=127.0.0.1 LEN=92 TOS=0x00 PREC=0x00 TTL=243 ID=39398 DF PROTO=TCP SPT=443 DPT=59156 WINDOW=16382 RES=0x00 ACK PSH URGP=0"
+                                      "Jan 27 13:04:22 test kernel: refused packet: IN=eth0 OUT= MAC=00:00:00:00:00:00:00:00:00:00:00:00:00:00 SRC=40.99.214.34 DST=127.0.0.1 LEN=129 TOS=0x00 PREC=0x00 TTL=243 ID=39399 DF PROTO=TCP SPT=443 DPT=59156 WINDOW=16382 RES=0x00 ACK PSH URGP=0"
+                                      "Jan 27 13:04:22 test kernel: refused packet: IN=eth0 OUT= MAC=00:00:00:00:00:00:00:00:00:00:00:00:00:00 SRC=40.99.214.34 DST=127.0.0.1 LEN=984 TOS=0x00 PREC=0x00 TTL=243 ID=39400 DF PROTO=TCP SPT=443 DPT=59156 WINDOW=16382 RES=0x00 ACK PSH URGP=0"
+                                      "Jan 27 13:04:22 test kernel: refused packet: IN=eth0 OUT= MAC=00:00:00:00:00:00:00:00:00:00:00:00:00:00 SRC=40.99.214.34 DST=127.0.0.1 LEN=392 TOS=0x00 PREC=0x00 TTL=243 ID=39401 DF PROTO=TCP SPT=443 DPT=59156 WINDOW=16382 RES=0x00 ACK PSH URGP=0"
+                                      "Jan 27 13:04:22 test kernel: refused packet: IN=eth0 OUT= MAC=00:00:00:00:00:00:00:00:00:00:00:00:00:00 SRC=40.99.214.34 DST=127.0.0.1 LEN=410 TOS=0x00 PREC=0x00 TTL=243 ID=39402 DF PROTO=TCP SPT=443 DPT=59156 WINDOW=16382 RES=0x00 ACK PSH URGP=0")
+                                     "\n")))
+         (worker (open-input-string log-lines))
+         (prometheus-metrics-format)))
+     "# TYPE firewall_refused_ip_banned counter\nfirewall_refused_ip_banned{SRC=\"40.99.214.34\",IN=\"eth0\",PROTO=\"TCP\",DPT=\"59156\",TOS=\"0\",DST=\"127.0.0.1\",MAC=\"00:00:00:00:00:00:00:00:00:00:00:00:00:00\"} 1\n# TYPE firewall_refused_ip counter\nfirewall_refused_ip{SRC=\"40.99.214.34\",IN=\"eth0\",PROTO=\"TCP\",DPT=\"59156\",TOS=\"0\",DST=\"127.0.0.1\",MAC=\"00:00:00:00:00:00:00:00:00:00:00:00:00:00\"} 5\n"))
   (test-case "getpcaps-parse-line"
     (check-equal?
      (vector-map bnf-node-value
