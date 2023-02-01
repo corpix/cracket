@@ -210,25 +210,29 @@
     (and
      (> (string-length line) 0)
      (unless (vector-member "cap_net_admin"
-                           (vector-map bnf-node-value
-                                       (bnf-node-collect
-                                        (getpcaps-parse-line line)
-                                        'capability)))
-      (error "current process can not modify firewall because cap_net_admin is not set, use init system to fix this"))))
+                            (vector-map bnf-node-value
+                                        (bnf-node-collect
+                                         (getpcaps-parse-line line)
+                                         'capability)))
+       (error "current process can not modify firewall because cap_net_admin is not set, use init system to fix this"))))
   (control 'wait)
   (close-input-port out)
   (close-input-port err))
 
 (module+ test
   (test-case "getpcaps-parse-line"
-    ;; TODO: more extensive tests
-    ;; for now it should just check that parser is fine with lines like this
-    (void (bnf-node-collect
-           (getpcaps-parse-line "402438: =")
-           'capability))
-    (void (bnf-node-collect
-           (getpcaps-parse-line "402438: cap_net_admin")
-           'capability))))
+    (check-equal?
+     (vector-map bnf-node-value
+                 (bnf-node-collect
+                  (getpcaps-parse-line "402438: =")
+                  'capability))
+     (vector))
+    (check-equal?
+     (vector-map bnf-node-value
+                 (bnf-node-collect
+                  (getpcaps-parse-line "402438: cap_net_admin")
+                  'capability))
+     (vector #"cap_net_admin"))))
 
 ;;
 
