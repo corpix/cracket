@@ -196,14 +196,6 @@
   (match-define (list out in _ err control)
     (process* (find-executable-path "journalctl") "-k" "--follow"))
   (close-output-port in)
-  (void
-   (thread (thunk (for ((line (in-lines err)))
-                    (displayln line)))))
-  (void
-   (thread (thunk (let loop ()
-                    (displayln (prometheus-metrics-format))
-                    (sleep 10)
-                    (loop)))))
   (worker out)
   (control 'wait)
   (close-input-port out)
