@@ -1,5 +1,9 @@
 #lang racket
 (require racket/os
+         web-server/dispatch
+         web-server/http
+         web-server/servlet-dispatch
+         web-server/web-server
          net/ip
          corpix/bnf
          corpix/time
@@ -8,34 +12,8 @@
 (module+ test
   (require rackunit))
 
-(define current-logger (make-parameter displayln))
-(define (log message)
-  ((current-logger) message))
-
-(define (command executable . arguments)
-  (match-let (((list out in pid err control)
-               (apply process* (find-executable-path executable)
-                      arguments)))
-    (close-output-port in)
-    (let* ((io (for/list ((evt (for/list ((port (list out err)))
-                                 (thread (lambda ()
-                                           (for ((line (in-lines port)))
-                                             (when (> (string-length line) 0)
-                                               (log line))))))))
-                 evt)))
-      (control 'wait)
-      (dynamic-wind void
-                    (thunk (let ((code (control 'exit-code)))
-                             (when (not (= code 0))
-                               (error (format "shell command '~a' exited with ~a code, err: ~a"
-                                              (append (list executable) arguments) code
-                                              (string-trim (port->string err) "\n"
-                                                           #:left? #t
-                                                           #:right? #t))))))
-                    (thunk (for ((port (in-list io)))
-                             (sync port))
-                           (close-input-port out)
-                           (close-input-port err))))))
+(define current-http-address (make-parameter "127.0.0.1"))
+(define current-http-port (make-parameter 5634))
 
 (define-bnf firewall-parse-line
   ((space " ")
@@ -65,6 +43,55 @@
               (+ (and key-value (* space)))
               )))
   line)
+
+(define-bnf getpcaps-parse-line
+  ((space " ")
+   (colon ":")
+   (comma ",")
+   (eq "=")
+   (spaces (+ space))
+   (alpha-lower (or "q" "w" "e" "r" "t" "y" "u" "i" "o" "p" "a" "s" "d" "f" "g" "h" "j" "k" "l" "z" "x" "c" "v" "b" "n" "m"))
+   (alpha-upper (or "Q" "W" "E" "R" "T" "Y" "U" "I" "O" "P" "A" "S" "D" "F" "G" "H" "J" "K" "L" "Z" "X" "C" "V" "B" "N" "M"))
+   (alpha (or alpha-lower alpha-upper))
+   (number (or "1" "2" "3" "4" "5" "6" "7" "8" "9" "0"))
+   (flags (+ (or "=" "+" "e" "i" "p")))
+   (capability (+ (or alpha number "_")))
+   (capabilities (* (and (or capability flags) (* flags) (* comma))))
+   (prefix (and (+ number) colon (* space)))
+   (line (and prefix capabilities)))
+  line)
+
+;;
+
+(define current-logger (make-parameter displayln))
+(define (log message)
+  ((current-logger) message))
+
+(define (command executable . arguments)
+  (match-let (((list out in pid err control)
+               (apply process* (find-executable-path executable)
+                      arguments)))
+    (close-output-port in)
+    (let* ((io (for/list ((evt (for/list ((port (list out err)))
+                                 (thread (lambda ()
+                                           (for ((line (in-lines port)))
+                                             (when (> (string-length line) 0)
+                                               (log line))))))))
+                 evt)))
+      (control 'wait)
+      (dynamic-wind void
+                    (thunk (let ((code (control 'exit-code)))
+                             (when (not (= code 0))
+                               (error (format "shell command '~a' exited with ~a code, err: ~a"
+                                              (append (list executable) arguments) code
+                                              (string-trim (port->string err) "\n"
+                                                           #:left? #t
+                                                           #:right? #t))))))
+                    (thunk (for ((port (in-list io)))
+                             (sync port))
+                           (close-input-port out)
+                           (close-input-port err))))))
+;;
 
 (define-struct firewall-refused
   (date hostname fields)
@@ -165,7 +192,7 @@
 
 ;;
 
-(define (main)
+(define (pump)
   (match-define (list out in _ err control)
     (process* (find-executable-path "journalctl") "-k" "--follow"))
   (close-output-port in)
@@ -182,31 +209,40 @@
   (close-input-port out)
   (close-input-port err))
 
-;;
+(define (http)
+  (define-values (app _)
+    (dispatch-rules
+     (("metrics") (make-prometheus-http-handler))
+     (else (thunk* (response/output
+                    #:code 404
+                    (lambda (out) (displayln "not found" out)))))))
+  (define (start host port)
+    (displayln (format "running web server on ~a:~a" host port))
+    (let ((jobs (list (prometheus-start-runtime-collector)
+                      (serve #:dispatch (dispatch/servlet app)
+                             #:listen-ip host
+                             #:port port))))
+      (thunk (for ((stop jobs)) (stop)))))
+  (define stop (start (current-http-address)
+                      (current-http-port)))
+  (with-handlers ((exn:break? (thunk*
+                               (displayln "stopping web server")
+                               (stop))))
+    (sync never-evt)))
 
-(define-bnf getpcaps-parse-line
-  ((space " ")
-   (colon ":")
-   (comma ",")
-   (eq "=")
-   (spaces (+ space))
-   (alpha-lower (or "q" "w" "e" "r" "t" "y" "u" "i" "o" "p" "a" "s" "d" "f" "g" "h" "j" "k" "l" "z" "x" "c" "v" "b" "n" "m"))
-   (alpha-upper (or "Q" "W" "E" "R" "T" "Y" "U" "I" "O" "P" "A" "S" "D" "F" "G" "H" "J" "K" "L" "Z" "X" "C" "V" "B" "N" "M"))
-   (alpha (or alpha-lower alpha-upper))
-   (number (or "1" "2" "3" "4" "5" "6" "7" "8" "9" "0"))
-   (flags (+ (or "=" "+" "e" "i" "p")))
-   (capability (+ (or alpha number "_")))
-   (capabilities (* (and (or capability flags) (* flags) (* comma))))
-   (prefix (and (+ number) colon (* space)))
-   (line (and prefix capabilities)))
-  line)
+(define (main)
+  (for ((job (in-list (list
+                       (thread pump)
+                       (thread http)))))
+    (sync job)))
+
+;;
 
 (define (preflight)
   (match-define (list out in _ err control)
     (process* (find-executable-path "getpcaps") (number->string (getpid))))
   (close-output-port in)
   (for ((line (in-lines out)))
-    (log (list 'getpcaps line))
     (and
      (> (string-length line) 0)
      (unless (vector-member #"cap_net_admin"
@@ -218,6 +254,14 @@
   (control 'wait)
   (close-input-port out)
   (close-input-port err))
+
+;;
+
+(module+ main
+  (preflight)
+  (main))
+
+;;
 
 (module+ test
   (test-case "getpcaps-parse-line"
@@ -240,8 +284,3 @@
                                  (getpcaps-parse-line "402438: cap_net_admin")
                                  'capability)))
           #t))))
-
-;;
-
-(preflight)
-(main)
