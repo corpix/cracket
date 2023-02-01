@@ -123,12 +123,12 @@
 ;;
 
 (define (check-in-firewall-lines p mode)
-    (unless (input-port? p) (raise-argument-error 'in-firewall-lines "input-port?" p))
-    (unless (memq mode '(linefeed return return-linefeed any any-one))
-      (raise-argument-error
-       'in-firewall-lines
-       "(or/c 'linefeed 'return 'return-linefeed 'any 'any-one)"
-       mode)))
+  (unless (input-port? p) (raise-argument-error 'in-firewall-lines "input-port?" p))
+  (unless (memq mode '(linefeed return return-linefeed any any-one))
+    (raise-argument-error
+     'in-firewall-lines
+     "(or/c 'linefeed 'return 'return-linefeed 'any 'any-one)"
+     mode)))
 
 (define-sequence-syntax in-firewall-lines
   (lambda () #'in-firewall-lines)
@@ -275,8 +275,8 @@
      (vector #"cap_net_admin"))
     (check-true
      (and (vector-member #"cap_net_admin"
-                    (vector-map bnf-node-value
-                                (bnf-node-collect
-                                 (getpcaps-parse-line "402438: cap_net_admin")
-                                 'capability)))
+                         (vector-map bnf-node-value
+                                     (bnf-node-collect
+                                      (getpcaps-parse-line "402438: cap_net_admin")
+                                      'capability)))
           #t))))
