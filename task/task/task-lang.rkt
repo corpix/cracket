@@ -1,6 +1,6 @@
 #lang racket
 (require racket
-         "syntax.rkt"
+         corpix/syntax
          "task.rkt")
 (provide (except-out (all-from-out racket)
                      read-syntax
