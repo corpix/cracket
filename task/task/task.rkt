@@ -148,6 +148,16 @@
                            (error (format "no task transformer defined for task name ~s" name)))))
        (transform #'(task argument ...))))))
 
+(define (task-run task . arguments)
+  (parameterize ((current-task task)
+                 (current-tasks-parameters (for/fold ((parameters (current-tasks-parameters)))
+                                                     ((argument (in-list arguments)))
+                                             (hash-set parameters
+                                                       (car argument)
+                                                       (cadr argument)))))
+    (apply (hash-ref (current-task-runners) (task-name task))
+           (list task))))
+
 ;;
 
 (define-syntax (define-isolation-method stx)
@@ -260,22 +270,19 @@
                                 (thread (thunk (task-run sub-task)))))))
             (sync job))))
 
-;;
+(define-task eval
+  (transformer ((expr ...)
+                (make-task 'eval '(begin expr ...))))
+  (runner (task)
+          (eval (task-body task))))
 
-(define (task-run task . arguments)
-  (parameterize ((current-task task)
-                 (current-tasks-parameters (for/fold ((parameters (current-tasks-parameters)))
-                                                     ((argument (in-list arguments)))
-                                             (hash-set parameters
-                                                       (car argument)
-                                                       (cadr argument)))))
-    (apply (hash-ref (current-task-runners) (task-name task))
-           (list task))))
+;;
 
 (module+ test
   (task-run (task-expand
              (sequential (shell "whoami")
                          (shell "pwd" #:cwd "/tmp")
+                         (eval (displayln 'eval-hello))
                          (shell "uname -a"))) ;; => '#s(task sequential (#s(task shell ("whoami")) #s(task shell ("uname -a"))))
             ) ;; => whoami: user
   ;; => uname -a: Linux ran 6.1.3 #1-NixOS SMP PREEMPT_DYNAMIC Wed Jan  4 10:29:02 UTC 2023 x86_64 GNU/Linux
