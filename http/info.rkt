@@ -1,8 +1,7 @@
 #lang info
+(define pkg-name "corpix-http")
 (define collection "corpix")
-(define deps '("base"))
-(define build-deps '("scribble-lib" "racket-doc" "rackunit-lib"))
-(define scribblings '(("scribblings/http.scrbl" ())))
-(define pkg-desc "Description Here")
+(define deps '("base" "corpix-url" "corpix-multipart" "corpix-hex"))
+(define build-deps '("rackunit-lib"))
 (define version "0.0")
 (define pkg-authors '(corpix))

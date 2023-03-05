@@ -1,12 +1,7 @@
 #lang info
+(define pkg-name "corpix-telegram")
 (define collection "corpix")
-(define deps '("racket"))
-(define build-deps '("scribble-lib"
-                     "racket-doc"
-                     "rackunit-lib"
-                     "corpix-http"))
-(define scribblings '(("scribblings/telegram.scrbl" ())))
-(define pkg-desc "Description Here")
+(define deps '("base" "corpix-json" "corpix-http"))
+(define build-deps '("rackunit-lib"))
 (define version "0.0")
 (define pkg-authors '(corpix))
-(define license '(Unlicense))

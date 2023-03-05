@@ -1,0 +1,13 @@
+package main
+
+func main() {
+	n := 0
+start:
+	{
+		println(n)
+		n++
+		if n < 5 {
+			goto start
+		}
+	}
+}

@@ -2,39 +2,23 @@ pkg := raco pkg
 racoinstall := $(pkg) install --skip-installed
 racouninstall := $(pkg) remove
 
-.PHONY: install
-install:
-	$(racoinstall) -n corpix-bytes      file://$(PWD)/bytes
-	$(racoinstall) -n corpix-hex        file://$(PWD)/hex
-	$(racoinstall) -n corpix-json       file://$(PWD)/json
-	$(racoinstall) -n corpix-prometheus file://$(PWD)/prometheus
-	$(racoinstall) -n corpix-url        file://$(PWD)/url
-	$(racoinstall) -n corpix-multipart  file://$(PWD)/multipart
-	$(racoinstall) -n corpix-http       file://$(PWD)/http
-	$(racoinstall) -n corpix-telegram   file://$(PWD)/telegram
-	$(racoinstall) -n corpix-task       file://$(PWD)/task
-	$(racoinstall) -n corpix-bnf        file://$(PWD)/bnf
-	$(racoinstall) -n corpix-time       file://$(PWD)/time
+pkg_dirs := $(shell find . -maxdepth 2 -type f -name info.rkt | xargs -I{} dirname {} | xargs -I{} basename {})
+pkg_names := $(shell find . -maxdepth 2 -type f -name info.rkt | xargs -I{} dirname {} | xargs -I{} basename {} | xargs -I{} printf "corpix-%s " {})
+pkg_files := $(shell find $(pkg_dirs) -type f -name '*.rkt')
+pkg_catalogs := $(shell raco pkg config catalogs | grep '^https:')
 
-	$(racoinstall) -n corpix-taskd      file://$(PWD)/taskd
-	$(racoinstall) -n corpix-firewalld  file://$(PWD)/firewalld
+catalog: makefile $(pkg_files)
+	mkdir -p .$@
+	racket -l- pkg/dirs-catalog --link .$@ .
+	raco pkg config --set catalogs file://$(shell pwd)/.$@ $(pkg_catalogs)
+
+.PHONY: install
+install: catalog
+	$(racoinstall) $(pkg_names)
 
 .PHONY: uninstall
-uninstall:
-	-$(racouninstall) corpix-bytes
-	-$(racouninstall) corpix-hex
-	-$(racouninstall) corpix-json
-	-$(racouninstall) corpix-prometheus
-	-$(racouninstall) corpix-url
-	-$(racouninstall) corpix-multipart
-	-$(racouninstall) corpix-http
-	-$(racouninstall) corpix-telegram
-	-$(racouninstall) corpix-task
-	-$(racouninstall) corpix-bnf
-	-$(racouninstall) corpix-time
-
-	-$(racouninstall) corpix-taskd
-	-$(racouninstall) corpix-firewalld
+uninstall: catalog
+	$(racouninstall) $(pkg_names)
 
 .PHONY: reinstall
 reinstall: uninstall install
