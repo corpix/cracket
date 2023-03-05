@@ -1116,9 +1116,9 @@
                                                  `(Content-Length . ,(number->string (bytes-length data)))))
                                   (open-input-bytes data)))
                      (body (cond
-                             ((input-port? body) (port->bytes body))
-                             ((string? body) (string->bytes/utf-8 body))
-                             ((bytes? body) body)))
+                             ((input-port? body) body)
+                             ((string? body) (open-input-string body))
+                             ((bytes? body) (open-input-bytes body))))
                      (else #f))))
     (-make-http-request
      host port
