@@ -1117,8 +1117,19 @@
                                   (open-input-bytes data)))
                      (body (cond
                              ((input-port? body) body)
-                             ((string? body) (open-input-string body))
-                             ((bytes? body) (open-input-bytes body))))
+                             ((string? body)
+                              (let ((body-bytes (string->bytes/utf-8 body)))
+                                (set! headers
+                                  (http-header-replace
+                                   headers
+                                   `(Content-Length . ,(number->string (bytes-length body-bytes)))))
+                                (open-input-bytes (string->bytes/utf-8 body))))
+                             ((bytes? body)
+                              (set! headers
+                                (http-header-replace
+                                 headers
+                                 `(Content-Length . ,(number->string (bytes-length body)))))
+                              (open-input-bytes body))))
                      (else #f))))
     (-make-http-request
      host port
