@@ -458,11 +458,12 @@
 
 ;;
 
-(create-dirs-catalog "/home/user/projects/src/git.backbone/corpix/cracket/pkg"
-                     '("/home/user/projects/src/git.backbone/corpix/cracket"))
+;; ;; $ make catalog
+;; ;; (create-dirs-catalog "/home/user/projects/src/git.backbone/corpix/cracket/.catalog"
+;; ;;                      '("/home/user/projects/src/git.backbone/corpix/cracket"))
 
-(current-packages (catalogs->packages (cons "file:///home/user/projects/src/git.backbone/corpix/cracket/pkg"
-                                            (current-package-catalog-urls))))
+;; (current-packages (catalogs->packages (cons "file:///home/user/projects/src/git.backbone/corpix/cracket/.catalog"
+;;                                             (current-package-catalog-urls))))
 
-(define test-package (hash-ref (current-packages) "corpix-http"))
-(displayln (nix-generate (package->nix test-package)))
+;; (define test-package (hash-ref (current-packages) "corpix-http"))
+;; (displayln (nix-generate (package->nix test-package)))
