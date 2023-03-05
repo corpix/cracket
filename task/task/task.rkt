@@ -31,9 +31,9 @@
     (close-output-port in)
     (let* ((logger (current-logger))
            (io (for/list ((evt (for/list ((port (list out err)))
-                                 (thread (lambda ()
-                                           (for ((line (in-lines port)))
-                                             (logger line)))))))
+                                 (thread (thunk
+                                          (for ((line (in-lines port)))
+                                            (logger line)))))))
                  evt)))
       (control 'wait)
       (dynamic-wind void
@@ -96,7 +96,7 @@
      (syntax/loc stx
        (begin
          (define-task-transformer (name stx-sym)
-           ((_ transformer-argument ... . rest)
+           ((_ transformer-argument ... . transformer-rest)
             (syntax/loc stx-sym transformer-template)) ...)
          (define-task-runner (name runner-argument ... . runner-rest)
            runner-body ...))))))
@@ -192,33 +192,39 @@
 
 ;;
 
+(define-struct shell-task
+  (command cwd)
+  #:prefab
+  #:constructor-name make-shell-task)
+
 (define-task shell
-  (transformer ((command:str)
-                (make-task 'shell (list command))))
+  (transformer ((command:str (~optional (~seq #:cwd cwd) #:defaults ((cwd #'#f))))
+                (make-task 'shell (make-shell-task command cwd))))
   (runner (task)
           (parameterize-tasks-defaults
            ((interpreter "bash")
             (interpreter-arguments '("-e"))
             (filename #f))
-
-           (let ((body (car (task-body task)))
-                 (body-file (make-temporary-file)))
+           (let* ((body (task-body task))
+                  (command-string (shell-task-command body))
+                  (command-string-file (make-temporary-file))
+                  (command-cwd (shell-task-cwd body)))
+             (file-or-directory-permissions command-string-file #o600)
              (dynamic-wind
-               (lambda () (file-or-directory-permissions body-file #o600))
-               (lambda ()
-                 (with-output-to-file
-                   body-file
-                   (lambda () (write-string body))
-                   #:exists 'truncate)
-                 (let ((previous-logger (current-logger))
-                       (logger-prefix (or filename body)))
-                   (parameterize ((current-logger (lambda (str)
-                                                    (previous-logger
-                                                     (string-append logger-prefix ": " str)))))
-                     (apply command
-                            (append (cons interpreter interpreter-arguments)
-                                    (list body-file))))))
-               (lambda () (delete-file body-file)))))))
+               void
+               (thunk
+                (with-output-to-file
+                  command-string-file
+                  (thunk (write-string command-string))
+                  #:exists 'truncate)
+                (let ((previous-logger (current-logger))
+                      (logger-prefix (or filename command-string)))
+                  (parameterize ((current-logger (lambda (str) (previous-logger (string-append logger-prefix ": " str))))
+                                 (current-directory (or command-cwd (current-directory))))
+                    (apply command
+                           (append (cons interpreter interpreter-arguments)
+                                   (list command-string-file))))))
+               (thunk (delete-file command-string-file)))))))
 
 (define-task git
   (transformer ((action . body)
@@ -269,9 +275,10 @@
 (module+ test
   (task-run (task-expand
              (sequential (shell "whoami")
+                         (shell "pwd" #:cwd "/tmp")
                          (shell "uname -a"))) ;; => '#s(task sequential (#s(task shell ("whoami")) #s(task shell ("uname -a"))))
             ) ;; => whoami: user
-              ;; => uname -a: Linux ran 6.1.3 #1-NixOS SMP PREEMPT_DYNAMIC Wed Jan  4 10:29:02 UTC 2023 x86_64 GNU/Linux
+  ;; => uname -a: Linux ran 6.1.3 #1-NixOS SMP PREEMPT_DYNAMIC Wed Jan  4 10:29:02 UTC 2023 x86_64 GNU/Linux
 
   (task-run (task-expand (concurrent (shell "date && sleep 1 && date")
                                      (shell "date && sleep 1 && date")
