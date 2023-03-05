@@ -72,6 +72,8 @@
          http-status-not-extended
          http-status-network-authentication-required
 
+         http-tls-security
+
          http-transport<%>
          http-transport-plaintext%
          http-transport-tls%
@@ -684,6 +686,8 @@
   #:transparent
   #:constructor-name -make-http-connection)
 
+(define http-tls-security (make-parameter 'secure))
+
 (define http-transport<%> (interface () get-name connect))
 
 (define http-transport-plaintext%
@@ -698,7 +702,7 @@
     (super-new)
     (define/public (get-name) 'tls)
     (define/public (connect host port)
-      (ssl-connect host port 'secure))))
+      (ssl-connect host port (http-tls-security)))))
 
 (define current-http-transport-maker (make-parameter #f))
 
