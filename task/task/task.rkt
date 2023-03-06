@@ -28,7 +28,8 @@
                (let ((executable-absolute-path (find-executable-path executable)))
                  (unless executable-absolute-path
                    (error (format "can not find absolute path for executable ~s in PATH" executable)))
-                 (apply process* executable-absolute-path arguments))))
+                 (parameterize ((current-subprocess-custodian-mode 'kill))
+                   (apply process* executable-absolute-path arguments)))))
     (close-output-port in)
     (let* ((logger (current-logger))
            (io (for/list ((evt (for/list ((port (list out err)))
