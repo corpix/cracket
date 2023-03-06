@@ -7,7 +7,8 @@
 (provide define-task
          define-task-runner
          task-expand
-         task-run)
+         task-run
+         (struct-out task))
 (module+ test
   (require rackunit))
 
@@ -17,7 +18,7 @@
 (define-for-syntax current-task-transformers (make-parameter (make-hasheq)))
 (define current-task-runners (make-parameter (make-hasheq)))
 (define current-isolation-methods (make-parameter (make-hasheq)))
-(define current-logger (make-parameter displayln))
+(define current-logger (make-parameter (lambda (msg . rest) (displayln (apply format msg rest)))))
 (define current-shell-executable (make-parameter "bash"))
 
 ;;
@@ -242,6 +243,43 @@
   (runner (task)
           (apply command "git" (task-body task))))
 
+(define-struct wait-port-task
+  (protocol identifier hostname retry wait)
+  #:prefab
+  #:constructor-name make-wait-port-task)
+
+(define-task wait-port
+  (transformer ((protocol identifier
+                          (~optional (~seq #:hostname hostname) #:defaults ((hostname #'"localhost")))
+                          (~optional (~seq #:retry retry) #:defaults ((retry #'5)))
+                          (~optional (~seq #:wait wait) #:defaults ((wait #'1))))
+                (make-task 'wait-port (make-wait-port-task protocol identifier hostname retry wait))))
+  (runner (task)
+          (let* ((body (task-body task))
+                 (protocol (wait-port-task-protocol body))
+                 (identifier (wait-port-task-identifier body))
+                 (retry (wait-port-task-retry body))
+                 (wait (wait-port-task-wait body))
+                 (hostname (wait-port-task-hostname body)))
+            (case protocol
+              ((tcp)
+               (let loop ((retries-left retry))
+                 (let* ((failed? #f)
+                        (custodian (make-custodian))
+                        (job (parameterize ((current-custodian custodian))
+                               (thread (thunk
+                                        (with-handlers ((exn? (thunk* (set! failed? #t))))
+                                          (tcp-connect hostname identifier)))))))
+                   (unless (and (sync/timeout wait job) (not failed?))
+                     (custodian-shutdown-all custodian)
+                     (if (> retries-left 0)
+                         (begin
+                           (sleep wait)
+                           (loop (- retries-left 1)))
+                         (error (format "given up waiting for ~a port (~a:~a) to become available after ~a retries"
+                                        protocol hostname identifier retry)))))))
+              (else (error (format "unsupported port protocol ~a" protocol)))))))
+
 (define-task isolate
   (transformer ((isolation task arguments ...)
                 (make-task 'isolate (list isolation (task-expand task) '(arguments ...)))))
@@ -282,6 +320,7 @@
   (task-run (task-expand
              (sequential (shell "whoami")
                          (shell "pwd" #:cwd "/tmp")
+                         ;; (wait-port 'tcp 8888)
                          (eval (displayln 'eval-hello))
                          (shell "uname -a"))) ;; => '#s(task sequential (#s(task shell ("whoami")) #s(task shell ("uname -a"))))
             ) ;; => whoami: user
