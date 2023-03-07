@@ -8,6 +8,7 @@
          define-task-runner
          task-expand
          task-run
+         tasks
          (struct-out task))
 (module+ test
   (require rackunit))
@@ -23,13 +24,19 @@
 
 ;;
 
+(define-syntax-rule (async body ...)
+  (let* ((parent (current-thread))
+         (exn-value #f)
+         (exn-handler (lambda (exn) (set! exn-value exn))))
+    (wrap-evt (thread (thunk (with-handlers ((exn? exn-handler)) body ...)))
+              (thunk* (when exn-value (raise exn-value))))))
+
 (define (command executable . arguments)
   (match-let (((list out in pid err control)
                (let ((executable-absolute-path (find-executable-path executable)))
                  (unless executable-absolute-path
                    (error (format "can not find absolute path for executable ~s in PATH" executable)))
-                 (parameterize ((current-subprocess-custodian-mode 'kill))
-                   (apply process* executable-absolute-path arguments)))))
+                 (apply process* executable-absolute-path arguments))))
     (close-output-port in)
     (let* ((logger (current-logger))
            (io (for/list ((evt (for/list ((port (list out err)))
@@ -93,72 +100,40 @@
   (syntax-parse stx
     #:datum-literals (transformer runner)
     ((_ name
-        (transformer ((transformer-argument ... . transformer-rest) transformer-template) ...)
+        (transformer (~optional (~seq #:literals transformer-literals) #:defaults ((transformer-literals #'())))
+                     ((transformer-argument ... . transformer-rest) transformer-template) ...)
         (runner (runner-argument ... . runner-rest) runner-body ...))
      (syntax/loc stx
        (begin
          (define-task-transformer (name stx-sym)
+           #:datum-literals transformer-literals
            ((_ transformer-argument ... . transformer-rest)
             (syntax/loc stx-sym transformer-template)) ...)
          (define-task-runner (name runner-argument ... . runner-rest)
            runner-body ...))))))
 
-(define-syntax (parameterize-tasks-defaults stx)
-  (syntax-parse stx
-    ((_ ((parameter-name:id parameter-value) ...) body ...)
-     (syntax/loc stx
-       (let* ((default (gensym))
-              (parameters (current-tasks-parameters)))
-         (parameterize ((current-tasks-parameters
-                         (for/fold ((parameters (current-tasks-parameters)))
-                                   ((name (in-list (list 'parameter-name ...)))
-                                    (value (in-list (list parameter-value ...))))
-                           (if (eq? (hash-ref parameters name default) default)
-                               (hash-set parameters name value)
-                               parameters))))
-           (let ((parameter-name (hash-ref (current-tasks-parameters) 'parameter-name)) ...)
-             body ...)))))))
-
-(define-syntax (parameterize-tasks stx)
-  (syntax-parse stx
-    ((_ ((parameter-name:id parameter-value) ...) body ...)
-     (syntax/loc stx
-       (let* ((parameters (current-tasks-parameters)))
-         (parameterize ((current-tasks-parameters
-                         (for/fold ((parameters (current-tasks-parameters)))
-                                   ((name (in-list (list 'parameter-name ...)))
-                                    (value (in-list (list parameter-value ...))))
-                           (hash-set parameters name value))))
-           (let ((parameter-name (hash-ref (current-tasks-parameters) 'parameter-name)) ...)
-             body ...)))))))
-
 
 (define-syntax (task-expression-expand stx)
   (syntax-parse stx
-    #:datum-literals (format parameter)
+    #:datum-literals (format)
     ((_ (format rest ...))
      (syntax/loc stx (format rest ...)))
-    ((_ (parameter name:id))
-     (syntax/loc stx (hash-ref (current-tasks-parameters) 'name)))
     ((_ expr) #'expr)))
 
 (define-syntax (task-expand stx)
   (syntax-parse stx
+    ((_ #f) #'#f)
     ((_ (task argument ...))
      (let* ((name (syntax->datum #'task))
             (transform (or (hash-ref (current-task-transformers) name #f)
                            (error (format "no task transformer defined for task name ~s" name)))))
        (transform #'(task argument ...))))))
 
-(define (task-run task . arguments)
-  (parameterize ((current-task task)
-                 (current-tasks-parameters (for/fold ((parameters (current-tasks-parameters)))
-                                                     ((argument (in-list arguments)))
-                                             (hash-set parameters
-                                                       (car argument)
-                                                       (cadr argument)))))
-    (apply (hash-ref (current-task-runners) (task-name task))
-           (list task))))
+(define (task-run task)
+  (and task
+       (parameterize ((current-task task))
+         (apply (hash-ref (current-task-runners) (task-name task))
+                (list task)))))
 
 ;;
 
@@ -205,38 +180,68 @@
 ;;
 
 (define-struct shell-task
-  (command cwd)
+  (command cwd interpreter interpreter-arguments filename)
   #:prefab
   #:constructor-name make-shell-task)
 
 (define-task shell
-  (transformer ((command:str (~optional (~seq #:cwd cwd) #:defaults ((cwd #'#f))))
-                (make-task 'shell (make-shell-task command cwd))))
+  (transformer ((command:str (~optional (~seq #:cwd cwd) #:defaults ((cwd #'#f)))
+                             (~optional (~seq #:interpreter interpreter) #:defaults ((interpreter #'"bash")))
+                             (~optional (~seq #:interpreter-arguments interpreter-arguments) #:defaults ((interpreter-arguments #''("-e"))))
+                             (~optional (~seq #:filename filename) #:defaults ((filename #'#f))))
+                (make-task 'shell (make-shell-task command cwd interpreter interpreter-arguments filename))))
   (runner (task)
-          (parameterize-tasks-defaults
-           ((interpreter "bash")
-            (interpreter-arguments '("-e"))
-            (filename #f))
-           (let* ((body (task-body task))
-                  (command-string (shell-task-command body))
-                  (command-string-file (make-temporary-file))
-                  (command-cwd (shell-task-cwd body)))
-             (file-or-directory-permissions command-string-file #o600)
-             (dynamic-wind
-               void
-               (thunk
-                (with-output-to-file
-                  command-string-file
-                  (thunk (write-string command-string))
-                  #:exists 'truncate)
-                (let ((previous-logger (current-logger))
-                      (logger-prefix (or filename command-string)))
-                  (parameterize ((current-logger (lambda (str) (previous-logger (string-append logger-prefix ": " str))))
-                                 (current-directory (or command-cwd (current-directory))))
-                    (apply command
-                           (append (cons interpreter interpreter-arguments)
-                                   (list command-string-file))))))
-               (thunk (delete-file command-string-file)))))))
+          (let* ((body (task-body task))
+                 (command (shell-task-command body))
+                 (command-file (make-temporary-file))
+                 (cwd (shell-task-cwd body))
+                 (interpreter (shell-task-interpreter body))
+                 (interpreter-arguments (shell-task-interpreter-arguments body))
+                 (filename (shell-task-filename body))
+                 (sem (make-semaphore))
+                 (custodian (make-custodian (current-custodian))))
+            (file-or-directory-permissions command-file #o600)
+            (dynamic-wind void
+                          (thunk
+                           (with-output-to-file command-file
+                             (thunk (write-string command))
+                             #:exists 'truncate)
+                           (let* ((logger (current-logger))
+                                  (logger-prefix (or filename command))
+                                  (interpreter-path (find-executable-path interpreter)))
+                             (unless interpreter-path
+                               (error (format "can not find path for iterpreter ~s in PATH" interpreter)))
+                             (let ((command-line (append (cons (path->string interpreter-path) interpreter-arguments)
+                                                         (list (path->string command-file)))))
+                               (parameterize ((current-logger (lambda (str . rest)
+                                                                (apply logger
+                                                                       (string-append logger-prefix ": " str)
+                                                                       rest))))
+                                 (match-let (((list out in pid err control)
+                                              (parameterize ((current-directory (or cwd (current-directory)))
+                                                             (current-custodian custodian))
+                                                (apply process* command-line))))
+                                   (close-output-port in)
+                                   (let* ((logger (current-logger))
+                                          (io (for/list ((evt (for/list ((port (list out err)))
+                                                                (thread (thunk
+                                                                         (for ((line (in-lines port)))
+                                                                           (logger line)))))))
+                                                evt)))
+                                     (control 'wait)
+                                     (let ((code (control 'exit-code)))
+                                       (when (not (= code 0))
+                                         (error (format "shell command '~a' exited with ~a code, err: ~s"
+                                                        (string-join command-line " ") code
+                                                        (string-trim (port->string err) "\n"
+                                                                     #:left? #t
+                                                                     #:right? #t)))))
+                                     (for ((port (in-list io)))
+                                       (sync port))))))))
+                          (thunk
+                           (semaphore-post sem)
+                           (custodian-shutdown-all custodian)
+                           (delete-file command-file))))))
 
 (define-task git
   (transformer ((action . body)
@@ -244,24 +249,25 @@
   (runner (task)
           (apply command "git" (task-body task))))
 
-(define-struct wait-port-task
-  (protocol identifier hostname retry wait)
+(define-struct port-task
+  (protocol identifier hostname retry wait inner)
   #:prefab
-  #:constructor-name make-wait-port-task)
+  #:constructor-name make-port-task)
 
-(define-task wait-port
-  (transformer ((protocol identifier
+(define-task port
+  (transformer ((protocol identifier task
                           (~optional (~seq #:hostname hostname) #:defaults ((hostname #'"localhost")))
-                          (~optional (~seq #:retry retry) #:defaults ((retry #'5)))
+                          (~optional (~seq #:retry retry) #:defaults ((retry #'30)))
                           (~optional (~seq #:wait wait) #:defaults ((wait #'1))))
-                (make-task 'wait-port (make-wait-port-task protocol identifier hostname retry wait))))
+                (make-task 'port (make-port-task protocol identifier hostname retry wait (task-expand task)))))
   (runner (task)
           (let* ((body (task-body task))
-                 (protocol (wait-port-task-protocol body))
-                 (identifier (wait-port-task-identifier body))
-                 (retry (wait-port-task-retry body))
-                 (wait (wait-port-task-wait body))
-                 (hostname (wait-port-task-hostname body)))
+                 (protocol (port-task-protocol body))
+                 (identifier (port-task-identifier body))
+                 (hostname (port-task-hostname body))
+                 (retry (port-task-retry body))
+                 (wait (port-task-wait body))
+                 (inner (port-task-inner body)))
             (case protocol
               ((tcp)
                (let loop ((retries-left retry))
@@ -279,7 +285,57 @@
                            (loop (- retries-left 1)))
                          (error (format "given up waiting for ~a port (~a:~a) to become available after ~a retries"
                                         protocol hostname identifier retry)))))))
-              (else (error (format "unsupported port protocol ~a" protocol)))))))
+              (else (error (format "unsupported port protocol ~a" protocol))))
+            (task-run inner))))
+
+(define-struct timeout-task
+  (duration inner)
+  #:prefab
+  #:constructor-name make-timeout-task)
+
+(define-task timeout
+  (transformer ((duration task)
+                (make-task 'timeout (make-timeout-task duration (task-expand task)))))
+  (runner (task)
+          (let* ((body (task-body task))
+                 (duration (timeout-task-duration body))
+                 (inner (timeout-task-inner body))
+                 (name (task-name inner))
+                 (custodian (make-custodian))
+                 (sem (make-semaphore))
+                 (job (async (unless (sync/timeout duration sem)
+                               (custodian-shutdown-all custodian)
+                               (error (format "task ~s timed out after ~a seconds" name duration))))))
+            (dynamic-wind
+              void
+              (thunk (parameterize ((current-custodian custodian)
+                                    (current-subprocess-custodian-mode 'kill)
+                                    (subprocess-group-enabled #t))
+                       (task-run inner)))
+              (thunk (semaphore-post sem)
+                     (sync job))))))
+
+(define-struct try-task
+  (inner except finally)
+  #:prefab
+  #:constructor-name make-try-task)
+
+(define-task try
+  (transformer ((task (~optional (~seq #:except except) #:defaults ((except #'#f)))
+                      (~optional (~seq #:finally finally) #:defaults ((finally #'#f))))
+                (make-task 'try (make-try-task (task-expand task)
+                                               (task-expand except)
+                                               (task-expand finally)))))
+  (runner (task)
+          (let* ((body (task-body task))
+                 (inner (try-task-inner body))
+                 (except (try-task-except body))
+                 (finally (try-task-finally body)))
+            (dynamic-wind
+              void
+              (thunk (with-handlers ((exn? (thunk* (task-run except))))
+                       (task-run inner)))
+              (thunk (task-run finally))))))
 
 (define-task isolate
   (transformer ((isolation task arguments ...)
@@ -292,7 +348,9 @@
                  (isolation-command-maker
                   (or (hash-ref (current-isolation-methods) name #f)
                       (error (format "isolation method is not defined: ~s" name)))))
-            (apply command (isolation-command-maker inner-task isolation-arguments)))))
+            (parameterize ((current-subprocess-custodian-mode 'kill)
+                           (subprocess-group-enabled #t))
+              (apply command (isolation-command-maker inner-task isolation-arguments))))))
 
 (define-task sequential
   (transformer ((task ...)
@@ -305,33 +363,26 @@
   (transformer ((task ...)
                 (make-task 'concurrent (list (task-expand task) ...))))
   (runner (task)
-          (for ((job (in-list (for/list ((sub-task (task-body task)))
-                                (thread (thunk (task-run sub-task)))))))
-            (sync job))))
+          (parameterize ((current-custodian (make-custodian)))
+            (dynamic-wind
+              void
+              (thunk (for ((job (in-list (for/list ((sub-task (task-body task)))
+                                           (async (task-run sub-task))))))
+                       (sync job)))
+              (thunk (custodian-shutdown-all (current-custodian)))))))
+
 
 (define-task eval
+  ;; NOTE: eval is limited in terms of the namespaces you could use
+  ;; because we should stay serializable (each task COULD be isolated)
+  ;; this is why we can not pass non primitive values here
+  ;; but this may be changed via some sort of RPC
+  ;; this will allow eg use shared procedures which can not be serialized
   (transformer ((expr ...)
                 (make-task 'eval '(begin expr ...))))
   (runner (task)
-          (eval (task-body task))))
+          (eval (task-body task)
+                (make-base-namespace))))
 
-;;
-
-(module+ test
-  (task-run (task-expand
-             (sequential (shell "whoami")
-                         (shell "pwd" #:cwd "/tmp")
-                         ;; (wait-port 'tcp 8888)
-                         (eval (displayln 'eval-hello))
-                         (shell "uname -a"))) ;; => '#s(task sequential (#s(task shell ("whoami")) #s(task shell ("uname -a"))))
-            ) ;; => whoami: user
-  ;; => uname -a: Linux ran 6.1.3 #1-NixOS SMP PREEMPT_DYNAMIC Wed Jan  4 10:29:02 UTC 2023 x86_64 GNU/Linux
-
-  (task-run (task-expand (concurrent (shell "date && sleep 1 && date")
-                                     (shell "date && sleep 1 && date")
-                                     (shell "date && sleep 1 && date")
-                                     (shell "date && sleep 1 && date")
-                                     (shell "date && sleep 1 && date")
-                                     (shell "for x in $(seq 1 10); do echo $x; sleep 1; done"))))
-  ;;(task-run (task-expand (isolate 'raw (shell "whoami"))))
-  )
+(define-syntax-rule (tasks exprs ...)
+  (task-run (task-expand (sequential exprs ...))))
