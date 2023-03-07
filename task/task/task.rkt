@@ -371,6 +371,36 @@
                        (sync job)))
               (thunk (custodian-shutdown-all (current-custodian)))))))
 
+(define-task ->
+  (transformer ((task)
+                (make-task '-> (task-expand task)))
+               ((task (wrapper arguments ...) rest ...)
+                (task-expand (-> (wrapper task arguments ...) rest ...)))
+               ((task wrapper rest ...)
+                (task-expand (-> (wrapper task) rest ...))))
+  (runner (task)
+          (task-run (task-body task))))
+
+(define-task ->>
+  (transformer ((task)
+                (make-task '->> (task-expand task)))
+               ((task (wrapper arguments ...) rest ...)
+                (task-expand (->> (wrapper arguments ... task) rest ...)))
+               ((task wrapper rest ...)
+                (task-expand (->> (wrapper task) rest ...))))
+  (runner (task)
+          (task-run (task-body task))))
+
+(define-task chain
+  (transformer #:literals (_)
+               ((task)
+                (make-task 'chain (task-expand task)))
+               ((task (wrapper arguments-before ... _ arguments-after ...) rest ...)
+                (task-expand (chain (wrapper arguments-before ... task arguments-after ...) rest ...)))
+               ((task wrapper rest ...)
+                (task-expand (chain (wrapper task) rest ...))))
+  (runner (task)
+          (task-run (task-body task))))
 
 (define-task eval
   ;; NOTE: eval is limited in terms of the namespaces you could use
