@@ -32,7 +32,6 @@
 ;;                    (shell "for x in $(seq 1 3); do echo $x; sleep 1; done")))
 ;;(task-run (task-expand (isolate 'raw (shell "whoami"))))
 
-(tasks (let ((w 5)
-             (foo "echo hello"))
-         (wait w)
-         (shell foo)))
+(tasks (let ((foo "echo hello"))
+         (->> (shell (format "echo this is ~a" foo))
+              (wait 1))))

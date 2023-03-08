@@ -340,7 +340,7 @@
 
 (define-task let
   (transformer ((((sym val) ...) task ...)
-                (make-task 'let (make-let-task '((sym val) ...) '(tasks task ...)))))
+                (make-task 'let (make-let-task '((sym val) ...) '(task ...)))))
   (runner (task)
           (let* ((body (task-body task))
                  (bindings (let-task-bindings body))
@@ -351,7 +351,7 @@
               (namespace-require `(file ,(path->string module)))
               (for ((binding (in-list bindings)))
                 (namespace-set-variable-value! (car binding) (cadr binding)))
-              (eval `(tasks ,inner))))))
+              (eval `(tasks ,@inner))))))
 
 (define-struct try-task
   (inner except finally)
