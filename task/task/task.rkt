@@ -185,10 +185,10 @@
   #:constructor-name make-shell-task)
 
 (define-task shell
-  (transformer ((command:str (~optional (~seq #:cwd cwd) #:defaults ((cwd #'#f)))
-                             (~optional (~seq #:interpreter interpreter) #:defaults ((interpreter #'"bash")))
-                             (~optional (~seq #:interpreter-arguments interpreter-arguments) #:defaults ((interpreter-arguments #''("-e"))))
-                             (~optional (~seq #:filename filename) #:defaults ((filename #'#f))))
+  (transformer ((command (~optional (~seq #:cwd cwd) #:defaults ((cwd #'#f)))
+                         (~optional (~seq #:interpreter interpreter) #:defaults ((interpreter #'"bash")))
+                         (~optional (~seq #:interpreter-arguments interpreter-arguments) #:defaults ((interpreter-arguments #''("-e"))))
+                         (~optional (~seq #:filename filename) #:defaults ((filename #'#f))))
                 (make-task 'shell (make-shell-task command cwd interpreter interpreter-arguments filename))))
   (runner (task)
           (let* ((body (task-body task))
@@ -201,47 +201,48 @@
                  (sem (make-semaphore))
                  (custodian (make-custodian (current-custodian))))
             (file-or-directory-permissions command-file #o600)
-            (dynamic-wind void
-                          (thunk
-                           (with-output-to-file command-file
-                             (thunk (write-string command))
-                             #:exists 'truncate)
-                           (let* ((logger (current-logger))
-                                  (logger-prefix (or filename command))
-                                  (interpreter-path (find-executable-path interpreter)))
-                             (unless interpreter-path
-                               (error (format "can not find path for iterpreter ~s in PATH" interpreter)))
-                             (let ((command-line (append (cons (path->string interpreter-path) interpreter-arguments)
-                                                         (list (path->string command-file)))))
-                               (parameterize ((current-logger (lambda (str . rest)
-                                                                (apply logger
-                                                                       (string-append logger-prefix ": " str)
-                                                                       rest))))
-                                 (match-let (((list out in pid err control)
-                                              (parameterize ((current-directory (or cwd (current-directory)))
-                                                             (current-custodian custodian))
-                                                (apply process* command-line))))
-                                   (close-output-port in)
-                                   (let* ((logger (current-logger))
-                                          (io (for/list ((evt (for/list ((port (list out err)))
-                                                                (thread (thunk
-                                                                         (for ((line (in-lines port)))
-                                                                           (logger line)))))))
-                                                evt)))
-                                     (control 'wait)
-                                     (let ((code (control 'exit-code)))
-                                       (when (not (= code 0))
-                                         (error (format "shell command '~a' exited with ~a code, err: ~s"
-                                                        (string-join command-line " ") code
-                                                        (string-trim (port->string err) "\n"
-                                                                     #:left? #t
-                                                                     #:right? #t)))))
-                                     (for ((port (in-list io)))
-                                       (sync port))))))))
-                          (thunk
-                           (semaphore-post sem)
-                           (custodian-shutdown-all custodian)
-                           (delete-file command-file))))))
+            (dynamic-wind
+              void
+              (thunk
+               (with-output-to-file command-file
+                 (thunk (write-string command))
+                 #:exists 'truncate)
+               (let* ((logger (current-logger))
+                      (logger-prefix (or filename command))
+                      (interpreter-path (find-executable-path interpreter)))
+                 (unless interpreter-path
+                   (error (format "can not find path for iterpreter ~s in PATH" interpreter)))
+                 (let ((command-line (append (cons (path->string interpreter-path) interpreter-arguments)
+                                             (list (path->string command-file)))))
+                   (parameterize ((current-logger (lambda (str . rest)
+                                                    (apply logger
+                                                           (string-append logger-prefix ": " str)
+                                                           rest))))
+                     (match-let (((list out in pid err control)
+                                  (parameterize ((current-directory (or cwd (current-directory)))
+                                                 (current-custodian custodian))
+                                    (apply process* command-line))))
+                       (close-output-port in)
+                       (let* ((logger (current-logger))
+                              (io (for/list ((evt (for/list ((port (list out err)))
+                                                    (thread (thunk
+                                                             (for ((line (in-lines port)))
+                                                               (logger line)))))))
+                                    evt)))
+                         (control 'wait)
+                         (let ((code (control 'exit-code)))
+                           (when (not (= code 0))
+                             (error (format "shell command '~a' exited with ~a code, err: ~s"
+                                            (string-join command-line " ") code
+                                            (string-trim (port->string err) "\n"
+                                                         #:left? #t
+                                                         #:right? #t)))))
+                         (for ((port (in-list io)))
+                           (sync port))))))))
+              (thunk
+               (semaphore-post sem)
+               (custodian-shutdown-all custodian)
+               (delete-file command-file))))))
 
 (define-task git
   (transformer ((action . body)
@@ -311,9 +312,46 @@
               (thunk (parameterize ((current-custodian custodian)
                                     (current-subprocess-custodian-mode 'kill)
                                     (subprocess-group-enabled #t))
-                       (task-run inner)))
-              (thunk (semaphore-post sem)
-                     (sync job))))))
+                       (thread (thunk (dynamic-wind
+                                        void
+                                        (thunk (task-run inner))
+                                        (thunk (semaphore-post sem)))))))
+              (thunk (sync job))))))
+
+(define-struct wait-task
+  (duration inner)
+  #:prefab
+  #:constructor-name make-wait-task)
+
+(define-task wait
+  (transformer ((duration task)
+                (make-task 'wait (make-wait-task duration (task-expand task)))))
+  (runner (task)
+          (let* ((body (task-body task))
+                 (duration (wait-task-duration body))
+                 (inner (wait-task-inner body)))
+            (sleep duration)
+            (task-run inner))))
+
+(define-struct let-task
+  (bindings inner)
+  #:prefab
+  #:constructor-name make-let-task)
+
+(define-task let
+  (transformer ((((sym val) ...) task ...)
+                (make-task 'let (make-let-task '((sym val) ...) '(tasks task ...)))))
+  (runner (task)
+          (let* ((body (task-body task))
+                 (bindings (let-task-bindings body))
+                 (inner (let-task-inner body))
+                 (namespace (make-base-namespace))
+                 (module (srcloc-source (syntax-srcloc #'here))))
+            (parameterize ((current-namespace namespace))
+              (namespace-require `(file ,(path->string module)))
+              (for ((binding (in-list bindings)))
+                (namespace-set-variable-value! (car binding) (cadr binding)))
+              (eval `(tasks ,inner))))))
 
 (define-struct try-task
   (inner except finally)
@@ -330,12 +368,15 @@
           (let* ((body (task-body task))
                  (inner (try-task-inner body))
                  (except (try-task-except body))
-                 (finally (try-task-finally body)))
-            (dynamic-wind
-              void
-              (thunk (with-handlers ((exn? (thunk* (task-run except))))
-                       (task-run inner)))
-              (thunk (task-run finally))))))
+                 (finally (try-task-finally body))
+                 (custodian (make-custodian)))
+            (parameterize ((current-custodian custodian))
+              (dynamic-wind
+                void
+                (thunk (with-handlers ((exn? (thunk* (task-run except))))
+                         (task-run inner)))
+                (thunk (task-run finally)
+                       (custodian-shutdown-all custodian)))))))
 
 (define-task isolate
   (transformer ((isolation task arguments ...)
