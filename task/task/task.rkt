@@ -1,25 +1,27 @@
 #lang racket
 (require corpix/syntax
          racket/async-channel
-         (for-syntax racket corpix/syntax))
+         (for-syntax racket
+                     corpix/syntax))
 (provide define-task
-         tasks
          current-task
          task-logger
-         task-logger-receiver
-         (for-syntax current-tasks)
+         sequential
+         concurrent
+         ->
+         ->>
+         chain
+         command
+         port
+         timeout
          (struct-out task))
-
 (define-logger task)
-(define task-logger-receiver (make-log-receiver task-logger 'info 'task))
-(current-logger task-logger)
 
 (define-struct task
   (name meta)
   #:transparent
   #:constructor-name make-task)
 
-(define-for-syntax current-tasks (make-parameter (make-hasheq)))
 (define current-task (make-parameter #f))
 
 (define-syntax (define-task stx)
@@ -29,57 +31,41 @@
         (~optional (~seq #:literals literals) #:defaults ((literals #'())))
         (~optional (~seq #:meta meta) #:defaults ((meta #'#f)))
         ((argument ...) body) ...)
-     (syntax/loc stx
-       (begin-for-syntax
-         (hash-set! (current-tasks) 'name
-                    (lambda (stx)
-                      (with-syntax ((expanded-body (syntax-parse stx
-                                                     #:datum-literals literals
-                                                     ((argument ...) body) ...)))
-                        (syntax (parameterize ((current-task (make-task 'name meta)))
-                                  expanded-body))))))))))
-
-(define-syntax (expand-task stx)
-  (let recur ((stx stx))
-    (syntax-parse stx
-      #:datum-literals (quote let let* parameterize)
-      ((_ (quote arguments ...)) (syntax (quote arguments ...)))
-      ((_ ((~or let let* parameterize) ((key value) ...) body ...))
-       (with-syntax ((sym (car (syntax->list (cadr (syntax->list stx))))))
-         (syntax (sym ((key value) ...)
-                      (expand-task body) ...))))
-      ((_ (name:id argument ...))
-       (let* ((name-datum (syntax->datum #'name))
-              (transformer (hash-ref (current-tasks) name-datum #f)))
-         (if transformer
-             (with-syntax ((task (transformer #'(argument ...))))
-               (syntax task))
-             (syntax (name (expand-tasks argument ...))))))
-      ((_ expr) (syntax expr)))))
-
-(define-syntax (expand-tasks stx)
-  (syntax-parse stx
-    ((_ body ...) (syntax (begin (expand-task body) ...)))))
-
-(define-syntax (tasks stx)
-  (syntax-parse stx
-    ((_ body ...) (syntax (expand-task (sequential body ...))))))
+     (with-syntax ((*** (quote-syntax ...))
+                   (name-aux (format-id #'name "~a-aux" #'name)))
+       (syntax/loc stx
+         (begin
+           (define-syntax (name-aux stx)
+             (syntax-parse stx
+               #:datum-literals literals
+               ((_ argument ...) body) ...))
+           (define-syntax (name stx)
+             (syntax-parse stx
+               #:datum-literals (name)
+               ((name (~optional (~seq #:description description) #:defaults ((description #''name)))
+                      expr ***)
+                (syntax/loc stx
+                  (parameterize ((current-task (make-task 'name meta))
+                                 (current-logger (make-logger 'name (current-logger))))
+                    (dynamic-wind
+                      void
+                      (thunk (log-debug "beginning execution of ~s" description)
+                             (name-aux expr ***))
+                      (thunk (log-debug "finished execution of ~s" description))))))))))))))
 
 ;;
 
 (define-task sequential
   ((task ...)
-   (syntax (begin (expand-task task) ...))))
+   (syntax (begin task ...))))
 
 (define-task concurrent
   ((task ...)
-   (syntax/loc #'(task ...)
+   (syntax
      (let* ((exn-chan (make-async-channel))
             (threads (list
                       (let* ((exn-handler (lambda (exn) (async-channel-put exn-chan exn))))
-                        (thread (thunk (with-handlers ((exn? exn-handler))
-                                         (expand-task task)))))
-                      ...)))
+                        (thread (thunk (with-handlers ((exn? exn-handler)) task)))) ...)))
        (dynamic-wind
          void
          (thunk (for ((job (in-list threads)))
@@ -91,28 +77,28 @@
 
 (define-task ->
   ((task)
-   (syntax (expand-task task))) ;; tail case
+   (syntax task))
   ((task (sub-task arguments ...) rest ...)
-   (syntax (expand-task (-> (sub-task task arguments ...) rest ...))))
+   (syntax (-> (sub-task task arguments ...) rest ...)))
   ((task sub-task rest ...)
-   (syntax (expand-task (-> (sub-task task) rest ...)))))
+   (syntax (-> (sub-task task) rest ...))))
 
 (define-task ->>
   ((task)
-   (syntax (expand-task task))) ;; tail case
+   (syntax task))
   ((task (sub-task arguments ...) rest ...)
-   (syntax (expand-task (->> (sub-task arguments ... task) rest ...))))
+   (syntax (->> (sub-task arguments ... task) rest ...)))
   ((task sub-task rest ...)
-   (syntax (expand-task (->> (sub-task task) rest ...)))))
+   (syntax (->> (sub-task task) rest ...))))
 
 (define-task chain
   #:literals (_)
   ((task)
-   (syntax (expand-task task))) ;; tail case
+   (syntax task)) ;; tail case
   ((task (sub-task arguments-before ... _ arguments-after ...) rest ...)
-   (syntax (expand-task (chain (sub-task arguments-before ... task arguments-after ...) rest ...))))
+   (syntax (chain (sub-task arguments-before ... task arguments-after ...) rest ...)))
   ((task sub-task rest ...)
-   (syntax (expand-task (chain (sub-task task) rest ...)))))
+   (syntax (chain (sub-task task) rest ...))))
 
 (define-task command
   ((command (~optional (~seq #:cwd cwd) #:defaults ((cwd #'#f)))
@@ -121,11 +107,7 @@
             (~optional (~seq #:name name) #:defaults ((name #'#f))))
    (syntax (let* ((custodian (make-custodian (current-custodian)))
                   (command-file (make-temporary-file))
-                  (logger-prefix (or name command))
-                  (logger (lambda (str . rest)
-                            (log-info (format "~a ~a"
-                                              (string-append logger-prefix ": " str)
-                                              (if (pair? rest) rest ""))))))
+                  (log-prefix (string-append (or name command))))
              (parameterize ((current-custodian custodian)
                             (current-subprocess-custodian-mode 'kill)
                             (subprocess-group-enabled #t))
@@ -147,7 +129,7 @@
                             (let* ((io (for/list ((evt (for/list ((port (list out err)))
                                                          (thread (thunk
                                                                   (for ((line (in-lines port)))
-                                                                    (logger line)))))))
+                                                                    (log-info "~a: ~a" log-prefix line)))))))
                                          evt)))
                               (control 'wait)
                               (dynamic-wind
@@ -190,7 +172,7 @@
                                             (error (format "given up waiting for ~a port (~a:~a) to become available after ~a retries"
                                                            'protocol hostname identifier retry))))))))
                          (else (error (format "unsupported port protocol ~a" (syntax->datum #'protocol)))))))
-     (syntax (begin wait (expand-task task))))))
+     (syntax (begin wait task)))))
 
 (define-task timeout
   ((duration:number task)
@@ -198,8 +180,7 @@
     (parameterize ((current-custodian (make-custodian (current-custodian))))
       (let* ((exn-chan (make-async-channel))
              (exn-handler (lambda (exn) (async-channel-put exn-chan exn)))
-             (task-job (thread (thunk (with-handlers ((exn? exn-handler))
-                                        (expand-task task)))))
+             (task-job (thread (thunk (with-handlers ((exn? exn-handler)) task))))
              (timer-job (thread (thunk (unless (sync/timeout duration task-job)
                                          (with-handlers ((exn? exn-handler))
                                            (error (format "task ~s timed out after ~a seconds"
