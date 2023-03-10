@@ -1,6 +1,5 @@
 #lang racket
-(require racket
-         corpix/syntax
+(require corpix/syntax
          "task.rkt")
 (provide (except-out (all-from-out racket)
                      read-syntax
@@ -19,4 +18,4 @@
 
 (define-syntax #%task-module-begin
   (syntax-rules ()
-    ((_ expr) (#%module-begin (task-run (task-expand expr))))))
+    ((_ expr) (#%module-begin (expand-task expr)))))
