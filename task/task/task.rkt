@@ -14,7 +14,8 @@
          command
          port
          timeout
-         (struct-out task))
+         (struct-out task)
+         (struct-out exn:fail:user:task:command))
 (define-logger task)
 
 (define-struct task
@@ -100,6 +101,9 @@
   ((task sub-task rest ...)
    (syntax (chain (sub-task task) rest ...))))
 
+(define-struct (exn:fail:user:task:command exn:fail:user)
+  (line code stderr))
+
 (define-task command
   ((command (~optional (~seq #:cwd cwd) #:defaults ((cwd #'#f)))
             (~optional (~seq #:interpreter interpreter) #:defaults ((interpreter #'"bash")))
@@ -136,11 +140,18 @@
                                 void
                                 (thunk (let ((code (control 'exit-code)))
                                          (when (not (= code 0))
-                                           (error (format "shell command '~a' exited with ~a code, err: ~a"
-                                                          (append (list interpreter) arguments) code
-                                                          (string-trim (port->string err) "\n"
-                                                                       #:left? #t
-                                                                       #:right? #t))))))
+                                           ;; FIXME: more concrete error which will signal the exit code for handlers
+                                           ;; we need to handle "killed" conditions
+                                           (raise (let ((line (string-join (append (list interpreter) arguments) " "))
+                                                        (stderr (or (port-closed? err)
+                                                                    (string-trim (port->string err) "\n"
+                                                                                 #:left? #t
+                                                                                 #:right? #t))))
+                                                    (make-exn:fail:user:task:command
+                                                     (format "shell command '~s' exited with code ~a~a"
+                                                             line code (if stderr (format ", err: ~a" stderr) ""))
+                                                     (current-continuation-marks)
+                                                     line code stderr))))))
                                 (thunk (for ((port (in-list io)))
                                          (sync port))
                                        (close-input-port out)
