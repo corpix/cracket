@@ -194,19 +194,20 @@
                task)))))
 
 (define-task timeout
-  ((duration:number task)
+  ((duration task ...)
    (syntax
-    (parameterize ((current-custodian (make-custodian (current-custodian))))
+    (let ((duration-value duration))
+      (parameterize ((current-custodian (make-custodian (current-custodian))))
       (let* ((exn-chan (make-async-channel))
              (exn-handler (lambda (exn) (async-channel-put exn-chan exn)))
-             (task-job (thread (thunk (with-handlers ((exn? exn-handler)) task))))
-             (timer-job (thread (thunk (unless (sync/timeout duration task-job)
+             (task-job (thread (thunk (with-handlers ((exn? exn-handler)) task ...))))
+             (timer-job (thread (thunk (unless (sync/timeout duration-value task-job)
                                          (with-handlers ((exn? exn-handler))
-                                           (error (format "task ~s timed out after ~a seconds"
-                                                          (car 'task) duration))))))))
+                                           (error (format "execution timed out after ~a seconds" duration-value))))))))
         (dynamic-wind
           void
-          (thunk (let ((result (sync (choice-evt exn-chan task-job))))
-                   (when (exn? result)
-                     (raise result))))
-          (thunk (custodian-shutdown-all (current-custodian)))))))))
+          (thunk (sync task-job)
+                 (let ((exn (async-channel-try-get exn-chan)))
+                   (when exn
+                     (raise exn))))
+          (thunk (custodian-shutdown-all (current-custodian))))))))))
