@@ -165,25 +165,33 @@
                (~optional (~seq #:hostname hostname) #:defaults ((hostname #'"localhost")))
                (~optional (~seq #:retry retry) #:defaults ((retry #'30)))
                (~optional (~seq #:wait wait) #:defaults ((wait #'1))))
-   (with-syntax ((wait (case (syntax->datum #'protocol)
-                         ((tcp)
-                          (syntax (let loop ((retries-left retry))
-                                    (let* ((failed? #f)
-                                           (custodian (make-custodian))
-                                           (job (parameterize ((current-custodian custodian))
-                                                  (thread (thunk
-                                                           (with-handlers ((exn? (thunk* (set! failed? #t))))
-                                                             (tcp-connect hostname identifier)))))))
-                                      (unless (and (sync/timeout wait job) (not failed?))
-                                        (custodian-shutdown-all custodian)
-                                        (if (> retries-left 0)
-                                            (begin
-                                              (sleep wait)
-                                              (loop (- retries-left 1)))
-                                            (error (format "given up waiting for ~a port (~a:~a) to become available after ~a retries"
-                                                           'protocol hostname identifier retry))))))))
-                         (else (error (format "unsupported port protocol ~a" (syntax->datum #'protocol)))))))
-     (syntax (begin wait task)))))
+   (with-syntax ((connect (case (syntax->datum #'protocol)
+                            ((tcp)
+                             (syntax (tcp-connect hostname identifier)))
+                            (else (error (format "unsupported port protocol ~a" (syntax->datum #'protocol)))))))
+     (syntax (begin
+               (parameterize ((current-custodian (make-custodian (current-custodian))))
+                 (dynamic-wind
+                   void
+                   (thunk (let ((exn-chan (make-async-channel)))
+                            (let loop ((retries-left retry))
+                              (let* ((job (thread (thunk (with-handlers ((exn? (lambda (exn) (async-channel-put exn-chan exn))))
+                                                           (log-debug "connecting to ~a using ~a protocol on ~a"
+                                                                      hostname 'protocol identifier)
+                                                           connect))))
+                                     (result (sync/timeout wait job)))
+                                (unless result
+                                  (kill-thread job))
+                                (when (or (async-channel-try-get exn-chan) (not result))
+                                  (if (> retries-left 0)
+                                      (begin (sleep wait)
+                                             (loop (- retries-left 1)))
+                                      (error (format "given up waiting for ~a port (~a:~a) to become available after ~a retries"
+                                                     'protocol hostname identifier retry)))))
+                              (log-debug "connected to ~a using ~a protocol on ~a, continuing"
+                                         hostname 'protocol identifier))))
+                   (thunk (custodian-shutdown-all (current-custodian)))))
+               task)))))
 
 (define-task timeout
   ((duration:number task)
