@@ -55,10 +55,10 @@
        (cond
          ((eof-object? data)
           (close-input-port in)
-          (prometheus-observe! clickhouse-metric-query-time
-                               (- (current-milliseconds) start-time)
-                               #:labels `((host . ,(connection-host connection))
-                                          (port . ,(connection-port connection)))))
+          (void (prometheus-observe! clickhouse-metric-query-time
+                                     (- (current-milliseconds) start-time)
+                                     #:labels `((host . ,(connection-host connection))
+                                                (port . ,(connection-port connection))))))
          (else
           (yield (string-split data "\t"))
           (loop)))))))
