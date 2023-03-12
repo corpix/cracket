@@ -1,11 +1,9 @@
-#lang racket/base
-
+#lang racket
 (require (for-syntax racket/base
                      syntax/parse
                      "syntax.rkt")
          "emit.rkt"
          "type.rkt")
-
 (provide sql:statement->string
          create-table
          insert

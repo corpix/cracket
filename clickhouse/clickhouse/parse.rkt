@@ -1,5 +1,4 @@
-#lang racket/base
-
+#lang racket
 (provide read-clickhouse)
 
 ;; FIXME: typed error

@@ -1,8 +1,6 @@
-#lang racket/base
-
+#lang racket
 (require (for-syntax racket/base
                      racket/syntax))
-
 (provide (all-defined-out))
 
 (define-syntax (define/lookup stx)
@@ -24,13 +22,15 @@
 
 (define/lookup primitive-type
   '(String
-    UInt8 UInt16 UInt32 UInt64
-    Int8 Int16 Int32 Int64
+    UInt8 UInt16 UInt32 UInt64 UInt128 UInt256
+    Int8 Int16 Int32 Int64 Int128 Int256
     Float32 Float64
-    Date DateTime))
+    Date DateTime DateTime64))
 
 (define/lookup complex-type
-  '(FixedString Array Tuple Enum8 Enum16 Nested Nullable))
+  '(FixedString Array Tuple Enum8 Enum16 Nested Nullable Decimal))
+
+;; FIXME: decimal, uint/int 128 & 256 are not covered with tests
 
 ;; engine kind
 

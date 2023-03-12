@@ -1,10 +1,7 @@
-#lang racket/base
-
-(require racket/match
-         srfi/19
+#lang racket
+(require srfi/19
          "constant.rkt"
          "parse.rkt")
-
 (provide convert
          transition)
 

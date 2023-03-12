@@ -1,5 +1,4 @@
-#lang racket/base
-
+#lang racket
 (provide (all-defined-out))
 
 (struct exn:fail:user:clickhouse:query exn:fail:user (query status message))
@@ -21,4 +20,3 @@
                                engine partition-by order-by primary-key sample-by) #:prefab)
 (struct sql:insert (name columns rows) #:prefab)
 (struct sql:select (expression from where) #:prefab)
-

@@ -4,10 +4,13 @@
          "convert.rkt"
          "query.rkt"
          "sql.rkt")
-
-(provide (all-from-out "convert.rkt"
+(provide clickhouse-metrics
+         (all-from-out "convert.rkt"
                        "connection.rkt"
                        "sql.rkt"
                        "query.rkt"
                        "connection.rkt"
                        "batch.rkt"))
+
+(define clickhouse-metrics
+  (list clickhouse-metric-query-time))

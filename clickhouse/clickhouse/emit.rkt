@@ -1,12 +1,7 @@
-#lang racket/base
-
-(require racket/match
-         racket/string
-         racket/vector
-         "constant.rkt"
+#lang racket
+(require "constant.rkt"
          "escape.rkt"
          "type.rkt")
-
 (provide emit-statement
          emit-create-table
          emit-insert

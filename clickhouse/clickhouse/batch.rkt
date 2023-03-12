@@ -1,8 +1,5 @@
-#lang racket/base
-(require racket/class
-         racket/function
-         racket/vector
-         library/runtime/event)
+#lang racket
+(require "event.rkt")
 (provide batch-writer%
          make-interval-batch-writer)
 

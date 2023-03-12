@@ -1,9 +1,7 @@
-#lang racket/base
-
+#lang racket
 (require syntax/parse
          "constant.rkt"
          "type.rkt")
-
 (provide CreateTable
          Insert
          Select

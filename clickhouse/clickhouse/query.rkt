@@ -1,53 +1,51 @@
-#lang racket/base
-
-(require (prefix-in http: library/network/http)
-         (prefix-in stats: (only-in library/network/statsd timer))
+#lang racket
+(require corpix/http
+         corpix/prometheus
          racket/contract
          racket/generator
-         racket/match
-         racket/port
-         racket/string
          "connection.rkt"
          "convert.rkt"
          "sql.rkt"
          "type.rkt")
-
-(provide schema
+(provide current-clickhouse-schema
+         clickhouse-metric-query-time
          (struct-out exn:fail:user:clickhouse:query)
          (contract-out
-          (query-raw     (-> connection? (or/c string? sql:statement?) generator?))
-          (query-convert (-> generator? procedure? list? generator?))
-          (query         (-> connection? (or/c string? sql:statement?) generator?))))
+          (clickhouse-query-raw     (-> connection? (or/c string? sql:statement?) generator?))
+          (clickhouse-query-convert (-> generator? procedure? list? generator?))
+          (clickhouse-query         (-> connection? (or/c string? sql:statement?) generator?))))
 
-(define schema (make-parameter null))
+(define current-clickhouse-schema (make-parameter null))
 
-(define (query-send! connection query)
-  (http:request-send! (http:make-request
+(define clickhouse-metric-query-time
+  (make-prometheus-metric-histogram 'clickhouse-query-time
+                                #:doc "Time spent sending and executing query in clickhouse"))
+
+(define (query-send! connection sql)
+  (http-request-send! (make-http-request
                        (connection-host connection)
                        (connection-port connection)
                        "/"
                        #:method 'post
-                       #:query (list (cons 'query query))
-                       #:headers (http:make-headers
-                                  ('Connection   "keep-alive")
-                                  ('Content-Type "application/x-www-form-urlencoded"))
-                       #:body query)))
+                       #:headers '((connection   . "keep-alive")
+                                   (content-type . "application/x-www-form-urlencoded"))
+                       #:body sql)))
 
-(define (query-raw connection statement)
+(define (clickhouse-query-raw connection statement)
   (let* ((start-time (current-milliseconds))
-         (query (match statement
+         (sql (match statement
                   ((? string?)         statement)
                   ((? sql:statement?) (sql:statement->string statement))))
-         (response (query-send! connection query))
-         (status (http:response-status response))
-         (in (http:response-body-reader response)))
+         (response (query-send! connection sql))
+         (status (http-response-status response))
+         (in (http-response-body-reader response)))
     (when (not (equal? status 200))
       (define message (port->string in))
       (close-input-port in)
       (raise (exn:fail:user:clickhouse:query
               (format "query failed with: ~a" message)
               (current-continuation-marks)
-              query
+              sql
               status
               message)))
     (generator
@@ -57,13 +55,15 @@
        (cond
          ((eof-object? data)
           (close-input-port in)
-          (stats:timer "clickhouse.client.query-raw"
-                       (- (current-milliseconds) start-time)))
+          (prometheus-observe! clickhouse-metric-query-time
+                               (- (current-milliseconds) start-time)
+                               #:labels `((host . ,(connection-host connection))
+                                          (port . ,(connection-port connection)))))
          (else
           (yield (string-split data "\t"))
           (loop)))))))
 
-(define (query-convert next transition schema)
+(define (clickhouse-query-convert next transition (schema (current-clickhouse-schema)))
   (generator
    ()
    (let loop ()
@@ -79,6 +79,6 @@
                    data schema)))
              (loop))))))
 
-(define (query connection statement)
-  (let ((generator (query-raw connection statement)))
-    (query-convert generator transition (schema))))
+(define (clickhouse-query connection statement)
+  (let ((generator (clickhouse-query-raw connection statement)))
+    (clickhouse-query-convert generator transition (current-clickhouse-schema))))
