@@ -18,4 +18,4 @@
 
 (define-syntax #%task-module-begin
   (syntax-rules ()
-    ((_ expr) (#%module-begin (expand-task expr)))))
+    ((_ expr) (#%module-begin expr))))
