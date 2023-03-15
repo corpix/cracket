@@ -2,263 +2,265 @@
 (require syntax/parse
          "constant.rkt"
          "type.rkt")
-(provide CreateTable
-         Insert
-         Select
+(provide ClickhouseCreateTable
+         ClickhouseInsert
+         ClickhouseSelect
          ;;
-         Type
-         Function
-         Columns
+         ClickhouseType
+         ClickhouseFunction
+         ClickhouseColumns
          ;; FIXME: we have function syntax class in export section
          ;; should we provide types and other "highlevel" entities too?
          ;; types - yes, engines - maybe, something other?
+         )
 
-         #%app)
-
-(define-syntax-class Unquote
+(define-syntax-class ClickhouseUnquote
   (pattern ((~datum unquote) e:expr)))
 
-(define-syntax-class Parameter
+(define-syntax-class ClickhouseParameter
   #:attributes (ast)
-  (pattern v:id      #:attr ast (sql:parameter #'v))
-  (pattern v:string  #:attr ast (sql:parameter #'v))
-  (pattern v:number  #:attr ast (sql:parameter #'v))
-  (pattern v:Unquote #:attr ast (sql:parameter #'v)))
+  (pattern v:id #:attr ast (clickhouse-sql-parameter #'v))
+  (pattern v:string #:attr ast (clickhouse-sql-parameter #'v))
+  (pattern v:number #:attr ast (clickhouse-sql-parameter #'v))
+  (pattern v:ClickhouseUnquote #:attr ast (clickhouse-sql-parameter #'v)))
 
 ;;
 
-(define-syntax-class PrimitiveType
+(define-syntax-class ClickhousePrimitiveType
   #:description "primitive type"
   #:attributes (ast)
   (pattern id:id
-           #:fail-when (and (not (primitive-type? (syntax->datum #'id))) #'id)
+           #:fail-when (and (not (clickhouse-primitive-type? (syntax->datum #'id))) #'id)
            "illegal type name"
-           #:attr ast (sql:type #'id null)))
+           #:attr ast (clickhouse-sql-type #'id null)))
 
-(define-syntax-class ComplexTypeArgument
+(define-syntax-class ClickhouseComplexTypeArgument
   #:description "complex type argument"
   #:attributes (ast)
-  (pattern argument:Type       #:attr ast (attribute argument.ast))
-  (pattern argument:Column     #:attr ast (attribute argument.ast))
-  (pattern argument:Mapping    #:attr ast (attribute argument.ast))
-  (pattern argument:Expression #:attr ast (attribute argument.ast)))
+  (pattern argument:ClickhouseType #:attr ast (attribute argument.ast))
+  (pattern argument:ClickhouseColumn #:attr ast (attribute argument.ast))
+  (pattern argument:ClickhouseMapping #:attr ast (attribute argument.ast))
+  (pattern argument:ClickhouseExpression #:attr ast (attribute argument.ast)))
 
-(define-syntax-class ComplexType
+(define-syntax-class ClickhouseComplexType
   #:description "complex type"
   #:attributes (ast)
-  (pattern (id:id arguments:ComplexTypeArgument ...)
-           #:fail-when (and (not (complex-type? (syntax->datum #'id)))
+  (pattern (id:id arguments:ClickhouseComplexTypeArgument ...)
+           #:fail-when (and (not (clickhouse-complex-type? (syntax->datum #'id)))
                             #'id)
            "expected type constructor"
-           #:attr ast (sql:type #'id (attribute arguments.ast))))
+           #:attr ast (clickhouse-sql-type #'id (attribute arguments.ast))))
 
-(define-syntax-class Type
+(define-syntax-class ClickhouseType
   #:description "type"
   #:attributes (ast)
-  (pattern type:PrimitiveType #:attr ast (attribute type.ast))
-  (pattern type:ComplexType   #:attr ast (attribute type.ast)))
+  (pattern type:ClickhousePrimitiveType #:attr ast (attribute type.ast))
+  (pattern type:ClickhouseComplexType   #:attr ast (attribute type.ast)))
 
 ;;
 
-(define-syntax-class Mapping
+(define-syntax-class ClickhouseMapping
   #:description "key with single value"
   #:attributes (ast)
-  (pattern (key:Expression value:Expression)
-           #:attr ast (sql:mapping (attribute key.ast)
-                                   (attribute value.ast))))
+  (pattern (key:ClickhouseExpression value:ClickhouseExpression)
+           #:attr ast (clickhouse-sql-mapping (attribute key.ast)
+                                              (attribute value.ast))))
 
-(define-syntax-class Column
+(define-syntax-class ClickhouseColumn
   #:description "table column"
   #:attributes (ast)
-  (pattern (name:id type:Type)
-           #:attr ast (sql:column #'name (attribute type.ast))))
+  (pattern (name:id type:ClickhouseType)
+           #:attr ast (clickhouse-sql-column #'name (attribute type.ast))))
 
-(define-splicing-syntax-class Columns
+(define-splicing-syntax-class ClickhouseColumns
   #:description "table columns list"
   #:attributes (ast)
-  (pattern (~seq columns:Column ...) #:attr ast (attribute columns.ast))
-  (pattern v:Unquote                 #:attr ast #'v))
+  (pattern (~seq columns:ClickhouseColumn ...) #:attr ast (attribute columns.ast))
+  (pattern v:ClickhouseUnquote #:attr ast #'v))
 
 ;;
 
-(define-syntax-class ExpressionInner
+(define-syntax-class ClickhouseExpressionInner
   #:attributes (ast)
-  (pattern e:Function   #:attr ast (attribute e.ast))
-  (pattern e:Parameter  #:attr ast (attribute e.ast))
-  (pattern e:Tuple      #:attr ast (attribute e.ast)))
+  (pattern e:ClickhouseFunction #:attr ast (attribute e.ast))
+  (pattern e:ClickhouseParameter #:attr ast (attribute e.ast))
+  (pattern e:ClickhouseTuple #:attr ast (attribute e.ast)))
 
-(define-syntax-class Expression
+(define-syntax-class ClickhouseExpression
   #:attributes (ast)
-  (pattern e:ExpressionInner #:attr ast (sql:expression #f (attribute e.ast))))
+  (pattern e:ClickhouseExpressionInner #:attr ast (clickhouse-sql-expression #f (attribute e.ast))))
 
-(define-splicing-syntax-class MaybeNamedExpression
+(define-splicing-syntax-class ClickhouseMaybeNamedExpression
   #:attributes (ast)
-  (pattern (~seq e:ExpressionInner #:as name:Parameter)
-           #:attr ast (sql:expression (attribute name.ast) (attribute e.ast)))
-  (pattern (~seq e:ExpressionInner)
-           #:attr ast (sql:expression #f (attribute e.ast))))
+  (pattern (~seq e:ClickhouseExpressionInner #:as name:ClickhouseParameter)
+           #:attr ast (clickhouse-sql-expression (attribute name.ast) (attribute e.ast)))
+  (pattern (~seq e:ClickhouseExpressionInner)
+           #:attr ast (clickhouse-sql-expression #f (attribute e.ast))))
 
-(define-splicing-syntax-class Expressions
+(define-splicing-syntax-class ClickhouseExpressions
   #:attributes (ast)
-  (pattern (~seq e:Expression ...) #:attr ast (attribute e.ast)))
+  (pattern (~seq e:ClickhouseExpression ...) #:attr ast (attribute e.ast)))
 
-(define-splicing-syntax-class ListOfExpressions
+(define-splicing-syntax-class ClickhouseListOfExpressions
   #:attributes (ast)
-  (pattern (~seq (e:Expressions) ...) #:attr ast (attribute e.ast)))
+  (pattern (~seq (e:ClickhouseExpressions) ...) #:attr ast (attribute e.ast)))
 
 ;;
 
-(define-syntax-class Function
+(define-syntax-class ClickhouseFunction
   #:attributes (ast)
-  (pattern (id:id arguments:Expression ...)
-           #:fail-when (and (not (function? (syntax->datum #'id))) #'id) "expected function"
-           #:attr ast (sql:function #'id (attribute arguments.ast))))
+  (pattern (id:id arguments:ClickhouseExpression ...)
+           #:fail-when (and (not (clickhouse-function? (syntax->datum #'id))) #'id) "expected function"
+           #:attr ast (clickhouse-sql-function #'id (attribute arguments.ast))))
 
-(define-syntax-class Tuple
+(define-syntax-class ClickhouseTuple
   #:attributes (ast)
-  (pattern (e:Expression ...) #:attr ast (sql:tuple (attribute e.ast))))
+  (pattern (e:ClickhouseExpression ...) #:attr ast (clickhouse-sql-tuple (attribute e.ast))))
 
 ;;
 
-(define-syntax-class PrimitiveEngine
+(define-syntax-class ClickhousePrimitiveEngine
   #:attributes (ast)
   (pattern engine:id
-           #:fail-when (and (not (primitive-engine? (syntax->datum #'engine)))
-                            #'engine)
+           #:fail-when (and (not (clickhouse-primitive-engine? (syntax->datum #'engine))) #'engine)
            "illegal engine name"
-           #:attr ast (sql:engine #'engine #f)))
+           #:attr ast (clickhouse-sql-engine #'engine #f)))
 
-(define-syntax-class ComplexEngine
+(define-syntax-class ClickhouseComplexEngine
   #:attributes (ast)
-  (pattern (engine:id arguments:Expression ...)
-           #:fail-when (and (not (complex-engine? (syntax->datum #'engine)))
+  (pattern (engine:id arguments:ClickhouseExpression ...)
+           #:fail-when (and (not (clickhouse-complex-engine? (syntax->datum #'engine)))
                             #'engine)
            "illegal engine name"
-           #:attr ast (sql:engine #'engine (attribute arguments.ast))))
+           #:attr ast (clickhouse-sql-engine #'engine (attribute arguments.ast))))
 
-(define-syntax-class Engine
+(define-syntax-class ClickhouseEngine
   #:description "table engine"
   #:attributes (ast)
-  (pattern engine:PrimitiveEngine #:attr ast (attribute engine.ast))
-  (pattern engine:ComplexEngine   #:attr ast (attribute engine.ast)))
+  (pattern engine:ClickhousePrimitiveEngine #:attr ast (attribute engine.ast))
+  (pattern engine:ClickhouseComplexEngine   #:attr ast (attribute engine.ast)))
 
-(define-splicing-syntax-class PartitionBy
+(define-splicing-syntax-class ClickhousePartitionBy
   #:description "partition expression"
   #:attributes (ast)
-  (pattern (~seq #:partition-by e:Expression) #:attr ast (attribute e.ast))
+  (pattern (~seq #:partition-by e:ClickhouseExpression) #:attr ast (attribute e.ast))
   (pattern (~seq) #:attr ast #f))
 
-(define-splicing-syntax-class OrderBy
+(define-splicing-syntax-class ClickhouseOrderBy
   #:description "order expression"
   #:attributes (ast)
-  (pattern (~seq #:order-by e:Expression) #:attr ast (attribute e.ast))
+  (pattern (~seq #:order-by e:ClickhouseExpression) #:attr ast (attribute e.ast))
   (pattern (~seq) #:attr ast #f))
 
-(define-splicing-syntax-class PrimaryKey
+(define-splicing-syntax-class ClickhousePrimaryKey
   #:description "primary key expression"
   #:attributes (ast)
-  (pattern (~seq #:primary-key e:Expression) #:attr ast (attribute e.ast))
+  (pattern (~seq #:primary-key e:ClickhouseExpression) #:attr ast (attribute e.ast))
   (pattern (~seq) #:attr ast #f))
 
-(define-splicing-syntax-class SampleBy
+(define-splicing-syntax-class ClickhouseSampleBy
   #:description "sample expression"
   #:attributes (ast)
-  (pattern (~seq #:sample-by e:Expression) #:attr ast (attribute e.ast))
+  (pattern (~seq #:sample-by e:ClickhouseExpression) #:attr ast (attribute e.ast))
   (pattern (~seq) #:attr ast #f))
 
 ;;
 
-(define-splicing-syntax-class From
+(define-splicing-syntax-class ClickhouseFrom
   #:description "from clause"
   #:attributes (ast)
-  (pattern (~seq #:from table:Parameter) #:attr ast (attribute table.ast))
-  (pattern (~seq #:from table:Select)    #:attr ast (attribute table.ast))
+  (pattern (~seq #:from table:ClickhouseParameter) #:attr ast (attribute table.ast))
+  (pattern (~seq #:from table:ClickhouseSelect) #:attr ast (attribute table.ast))
   (pattern (~seq) #:attr ast #f))
 
 ;;
 
-(define-splicing-syntax-class Where
+(define-splicing-syntax-class ClickhouseWhere
   #:description "where clause"
   #:attributes (ast)
-  (pattern (~seq #:where e:Expression) #:attr ast (attribute e.ast))
-  (pattern (~seq)                      #:attr ast #f))
+  (pattern (~seq #:where e:ClickhouseExpression) #:attr ast (attribute e.ast))
+  (pattern (~seq) #:attr ast #f))
 
 ;;
 
-(define-syntax-class TableName
+(define-syntax-class ClickhouseTableName
   #:description "table name"
   #:attributes (ast)
-  (pattern name:Parameter #:attr ast (attribute name.ast)))
+  (pattern name:ClickhouseParameter #:attr ast (attribute name.ast)))
 
-(define-splicing-syntax-class TableTemporary
+(define-splicing-syntax-class ClickhouseTableTemporary
   #:description "is temporary flag"
   #:attributes (ast)
   (pattern (~seq #:temporary) #:attr ast #t)
   (pattern (~seq) #:attr ast #f))
 
-(define-splicing-syntax-class TableIfNotExists
+(define-splicing-syntax-class ClickhouseTableIfNotExists
   #:description "table if not exists"
   #:attributes (ast)
   (pattern (~seq #:if-not-exists) #:attr ast #t)
   (pattern (~seq) #:attr ast #f))
 
-(define-splicing-syntax-class Cluster
+(define-splicing-syntax-class ClickhouseCluster
   #:description "cluster"
   #:attributes (ast)
-  (pattern (~seq #:cluster cluster:Parameter) #:attr ast (attribute cluster.ast))
-  (pattern (~seq)                             #:attr ast #f))
+  (pattern (~seq #:cluster cluster:ClickhouseParameter) #:attr ast (attribute cluster.ast))
+  (pattern (~seq) #:attr ast #f))
 
 ;;
 
-(define-syntax-class CreateTable
+(define-syntax-class ClickhouseCreateTable
   #:description "create table"
   #:attributes (ast)
-  (pattern (_ temporary:TableTemporary
-              if-not-exists:TableIfNotExists
-              name:TableName
-              cluster:Cluster
-              #:columns columns:Columns
-              #:engine engine:Engine
-              partition-by:PartitionBy
-              order-by:OrderBy
-              primary-key:PrimaryKey
-              sample-by:SampleBy)
-           #:attr ast (sql:create-table
-                       (attribute name.ast) (attribute temporary.ast) (attribute if-not-exists.ast)
+  (pattern (_ temporary:ClickhouseTableTemporary
+              if-not-exists:ClickhouseTableIfNotExists
+              name:ClickhouseTableName
+              cluster:ClickhouseCluster
+              #:columns columns:ClickhouseColumns
+              #:engine engine:ClickhouseEngine
+              partition-by:ClickhousePartitionBy
+              order-by:ClickhouseOrderBy
+              primary-key:ClickhousePrimaryKey
+              sample-by:ClickhouseSampleBy)
+           #:attr ast (clickhouse-sql-create-table
+                       (attribute name.ast)
+                       (attribute temporary.ast)
+                       (attribute if-not-exists.ast)
                        (attribute cluster.ast)
                        (attribute columns.ast)
                        (attribute engine.ast)
-                       (attribute partition-by.ast) (attribute order-by.ast)
-                       (attribute primary-key.ast) (attribute sample-by.ast))))
+                       (attribute partition-by.ast)
+                       (attribute order-by.ast)
+                       (attribute primary-key.ast)
+                       (attribute sample-by.ast))))
 
-(define-splicing-syntax-class InsertColumns
+(define-splicing-syntax-class ClickhouseInsertColumns
   #:description "column list"
   #:attributes (ast)
-  (pattern (~seq #:columns (columns:Expressions)) #:attr ast (attribute columns.ast))
+  (pattern (~seq #:columns (columns:ClickhouseExpressions)) #:attr ast (attribute columns.ast))
   (pattern (~seq) #:attr ast #f))
 
-(define-splicing-syntax-class InsertRows
+(define-splicing-syntax-class ClickhouseInsertRows
   #:description "row list"
   #:attributes (ast)
-  (pattern (~seq #:rows unquote:Unquote) #:attr ast #'unquote)
-  (pattern (~seq #:rows rows:ListOfExpressions) #:attr ast (attribute rows.ast)))
+  (pattern (~seq #:rows unquote:ClickhouseUnquote) #:attr ast #'unquote)
+  (pattern (~seq #:rows rows:ClickhouseListOfExpressions) #:attr ast (attribute rows.ast)))
 
-(define-syntax-class Insert
+(define-syntax-class ClickhouseInsert
   #:description "insert"
   #:attributes (ast)
-  (pattern (_ #:into name:TableName
-              columns:InsertColumns
-              rows:InsertRows)
-           #:attr ast (sql:insert
+  (pattern (_ #:into name:ClickhouseTableName
+              columns:ClickhouseInsertColumns
+              rows:ClickhouseInsertRows)
+           #:attr ast (clickhouse-sql-insert
                        (attribute name.ast)
                        (attribute columns.ast)
                        (attribute rows.ast))))
 
-(define-syntax-class Select
+(define-syntax-class ClickhouseSelect
   #:description "select"
   #:attributes (ast)
-  (pattern (_ e:MaybeNamedExpression ... from:From where:Where)
-           #:attr ast (sql:select
+  (pattern (_ e:ClickhouseMaybeNamedExpression ... from:ClickhouseFrom where:ClickhouseWhere)
+           #:attr ast (clickhouse-sql-select
                        (attribute e.ast)
                        (attribute from.ast)
                        (attribute where.ast))))

@@ -1,9 +1,9 @@
 #lang racket
 (require "event.rkt")
-(provide batch-writer%
-         make-interval-batch-writer)
+(provide clickhouse-batch-writer%
+         make-clickhouse-interval-batch-writer)
 
-(define batch-writer%
+(define clickhouse-batch-writer%
   (class object%
     (super-new)
     (init-field flush (buffer-size 128))
@@ -35,7 +35,7 @@
          (set! counter (add1 counter))
          (and (= counter buffer-size) (flush!/maybe)))))))
 
-(define (make-interval-batch-writer batch time)
+(define (make-clickhouse-interval-batch-writer batch time)
   (thread (thunk
            (let loop ()
              (define timer-evt (alarm-evt (+ (current-milliseconds) time)))
@@ -47,10 +47,10 @@
   (require rackunit
            racket/async-channel)
 
-  (test-case "batch-writer%"
+  (test-case "clickhouse-batch-writer%"
     (test-case "append!+flush!"
       (let* ((chan (make-async-channel 1))
-             (batch (new batch-writer%
+             (batch (new clickhouse-batch-writer%
                          (flush (lambda (vec) (async-channel-put chan vec)))
                          (buffer-size 3))))
         (test-case "single"
@@ -71,16 +71,16 @@
           (check-false (send batch flush!))
           (check-equal? (sync/timeout 0 chan) #f))))
     (test-case "flush-evt"
-      (let* ((batch (new batch-writer% (flush void)))
+      (let* ((batch (new clickhouse-batch-writer% (flush void)))
              (done (send batch flush-evt)))
         (send batch append! "hello")
         (send batch flush!)
         (check-true (notify-evt? (sync/timeout 3 done)))
         (check-equal? (sync/timeout 0 (send batch flush-evt)) #f)))
-    (test-case "interval-batch-writer"
+    (test-case "clickhouse-interval-batch-writer"
       (let* ((chan (make-async-channel 1))
-             (batch (new batch-writer% (flush (lambda (vec) (async-channel-put chan vec)))))
-             (timer (make-interval-batch-writer batch 100)))
+             (batch (new clickhouse-batch-writer% (flush (lambda (vec) (async-channel-put chan vec)))))
+             (timer (make-clickhouse-interval-batch-writer batch 100)))
         (send batch append! "hello")
         (send batch append! "you")
         (check-true (notify-evt? (sync/timeout 3 (send batch flush-evt))))

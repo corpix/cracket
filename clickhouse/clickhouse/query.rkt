@@ -6,25 +6,29 @@
          "connection.rkt"
          "convert.rkt"
          "sql.rkt"
-         "type.rkt")
+         "type.rkt"
+         (for-syntax racket/base
+                     corpix/syntax
+                     "syntax.rkt"))
 (provide current-clickhouse-schema
          clickhouse-metric-query-time
+         clickhouse
          (struct-out exn:fail:user:clickhouse:query)
          (contract-out
-          (clickhouse-query-raw     (-> connection? (or/c string? sql:statement?) generator?))
+          (clickhouse-query-raw     (-> clickhouse-connection? (or/c string? clickhouse-sql-statement?) generator?))
           (clickhouse-query-convert (-> generator? procedure? list? generator?))
-          (clickhouse-query         (-> connection? (or/c string? sql:statement?) generator?))))
+          (clickhouse-query         (-> clickhouse-connection? (or/c string? clickhouse-sql-statement?) generator?))))
 
 (define current-clickhouse-schema (make-parameter null))
 
 (define clickhouse-metric-query-time
   (make-prometheus-metric-histogram 'clickhouse-query-time
-                                #:doc "Time spent sending and executing query in clickhouse"))
+                                    #:doc "Time spent sending and executing query in clickhouse"))
 
 (define (query-send! connection sql)
   (http-request-send! (make-http-request
-                       (connection-host connection)
-                       (connection-port connection)
+                       (clickhouse-connection-host connection)
+                       (clickhouse-connection-port connection)
                        "/"
                        #:method 'post
                        #:headers '((connection   . "keep-alive")
@@ -34,8 +38,8 @@
 (define (clickhouse-query-raw connection statement)
   (let* ((start-time (current-milliseconds))
          (sql (match statement
-                  ((? string?)         statement)
-                  ((? sql:statement?) (sql:statement->string statement))))
+                ((? string?) statement)
+                ((? clickhouse-sql-statement?) (clickhouse-sql-statement->string statement))))
          (response (query-send! connection sql))
          (status (http-response-status response))
          (in (http-response-body-reader response)))
@@ -57,8 +61,8 @@
           (close-input-port in)
           (void (prometheus-observe! clickhouse-metric-query-time
                                      (- (current-milliseconds) start-time)
-                                     #:labels `((host . ,(connection-host connection))
-                                                (port . ,(connection-port connection))))))
+                                     #:labels `((host . ,(clickhouse-connection-host connection))
+                                                (port . ,(clickhouse-connection-port connection))))))
          (else
           (yield (string-split data "\t"))
           (loop)))))))
@@ -75,10 +79,23 @@
                   data
                   (map
                    (lambda (value type)
-                     (convert type (transition type) value))
+                     (clickhouse-convert type (transition type) value))
                    data schema)))
              (loop))))))
 
 (define (clickhouse-query connection statement)
-  (let ((generator (clickhouse-query-raw connection statement)))
-    (clickhouse-query-convert generator transition (current-clickhouse-schema))))
+  (clickhouse-query-convert (clickhouse-query-raw connection statement)
+                            clickhouse-transition
+                            (current-clickhouse-schema)))
+
+(define-syntax (clickhouse stx)
+  (syntax-parse stx
+    ((_ (~optional (~seq #:connection connection) #:defaults ((connection #'(current-clickhouse-connection))))
+        (name rest ...))
+     (with-syntax ((prefixed-name (format-id #'name "clickhouse-~a" #'name)))
+       (syntax/loc stx
+         (clickhouse-query connection (prefixed-name rest ...)))))
+    ((_ (~optional (~seq #:connection connection) #:defaults ((connection #'(current-clickhouse-connection))))
+        sql:string)
+     (syntax/loc stx
+       (clickhouse-query connection sql)))))

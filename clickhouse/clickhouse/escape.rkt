@@ -1,6 +1,5 @@
 #lang racket
-(provide (all-defined-out)
-         #%app) ;; FIXME: wtf? #%app
+(provide (all-defined-out))
 
 (define escape-regexp (regexp "([\\'])"))
 (define (sql-escape v)

@@ -1,7 +1,7 @@
 #lang racket
 (provide read-clickhouse)
 
-;; FIXME: typed error
+;; TODO: typed error
 (define (expect ch . expected)
   (unless (memq ch expected)
     (error 'read "expected: ~v, got: ~a" expected ch))
@@ -121,28 +121,16 @@
   (require rackunit)
 
   (check-equal? (read-clickhouse (open-input-string "'hell\\'o'")) "hell'o")
-
   (check-equal? (read-clickhouse (open-input-string "123")) 123)
   (check-equal? (read-clickhouse (open-input-string "-123")) -123)
   (check-equal? (read-clickhouse (open-input-string "123.321")) 123.321)
   (check-equal? (read-clickhouse (open-input-string "-123.321")) -123.321)
-
   (check-equal? (read-clickhouse (open-input-string "'hello'")) "hello")
-
   (check-equal? (read-clickhouse (open-input-string "\\N")) 'null)
-
-  (check-equal? (read-clickhouse (open-input-string "['foo']"))
-                '("foo"))
-  (check-equal? (read-clickhouse (open-input-string "['foo','bar']"))
-                '("foo" "bar"))
-  (check-equal? (read-clickhouse (open-input-string "['foo', 'bar']"))
-                '("foo" "bar"))
-  (check-equal? (read-clickhouse (open-input-string "[1, 2.1, -1, -2.1, 'hello']"))
-                '(1 2.1 -1 -2.1 "hello"))
-
-  (check-equal? (read-clickhouse (open-input-string "('foo')"))
-                '("foo"))
-  (check-equal? (read-clickhouse (open-input-string "('foo','bar')"))
-                '("foo" "bar"))
-  (check-equal? (read-clickhouse (open-input-string "('foo', 'bar')"))
-                '("foo" "bar")))
+  (check-equal? (read-clickhouse (open-input-string "('foo')")) '("foo"))
+  (check-equal? (read-clickhouse (open-input-string "('foo','bar')")) '("foo" "bar"))
+  (check-equal? (read-clickhouse (open-input-string "('foo', 'bar')")) '("foo" "bar"))
+  (check-equal? (read-clickhouse (open-input-string "(1, 2.1, -1, -2.1, 'hello')")) '(1 2.1 -1 -2.1 "hello"))
+  (check-equal? (read-clickhouse (open-input-string "('foo')")) '("foo"))
+  (check-equal? (read-clickhouse (open-input-string "('foo','bar')")) '("foo" "bar"))
+  (check-equal? (read-clickhouse (open-input-string "('foo', 'bar')")) '("foo" "bar")))

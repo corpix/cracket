@@ -1,14 +1,18 @@
-#lang racket/base
+#lang racket
 (require racket/contract)
-
-(provide (struct-out connection)
+(provide current-clickhouse-connection
+         (except-out (struct-out clickhouse-connection) -make-clickhouse-connection)
          (contract-out
-          (make-connection (->* () (#:host string? #:port exact-nonnegative-integer?)
-                                connection?))))
+          (make-clickhouse-connection
+           (->* () (#:host string? #:port exact-nonnegative-integer?) clickhouse-connection?))))
 
-(struct connection (host port))
+(define current-clickhouse-connection (make-parameter #f))
 
-(define (make-connection
+(define-struct clickhouse-connection
+  (host port)
+  #:constructor-name -make-clickhouse-connection)
+
+(define (make-clickhouse-connection
          #:host (host "127.0.0.1")
          #:port (port 8123))
-  (connection host port))
+  (-make-clickhouse-connection host port))
