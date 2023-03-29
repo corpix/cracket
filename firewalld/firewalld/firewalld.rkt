@@ -1,5 +1,6 @@
 #lang racket
 (require racket/os
+         racket/cmdline
          web-server/dispatch
          web-server/http
          web-server/servlet-dispatch
@@ -8,18 +9,32 @@
          corpix/bnf
          corpix/time
          corpix/hex
-         corpix/prometheus)
+         corpix/prometheus
+         (for-syntax corpix/syntax))
 (module+ test
   (require rackunit))
 
-(define current-http-address (make-parameter "127.0.0.1"))
-(define current-http-port (make-parameter 5634))
-(define current-by-ip-limit (make-parameter 20))
-(define current-ttl (make-parameter (hour-duration 2)))
-(define current-ttl-timer (make-parameter 60))
-(define current-firewall (make-parameter 'iptables))
+(define current-configuration-path (make-parameter (path->complete-path "./config.rkt")))
 
-(define-bnf firewall-parse-line
+(define (config key (default #f))
+  (with-handlers ((exn:fail? (lambda (exn) default)))
+    (dynamic-require (current-configuration-path) key)))
+
+(define-syntax (define-configurable stx)
+  (syntax-parse stx
+    ((_ key default)
+     (syntax (define key (make-derived-parameter (make-parameter (or (config 'key #f) default))
+                                                 values
+                                                 (lambda (value) (or (config 'key #f) value))))))))
+
+(define-configurable current-http-address "127.0.0.1")
+(define-configurable current-http-port 5634)
+(define-configurable current-by-ip-limit 20)
+(define-configurable current-ttl (hour-duration 2))
+(define-configurable current-ttl-timer 60)
+(define-configurable current-firewall 'iptables)
+
+(define-bnf firewall-line
   ((space " ")
    (colon ":")
    (dot ".")
@@ -181,7 +196,7 @@
                                                 (next))))
                           (if (eof-object? line)
                               line
-                              (firewall-fold-line (firewall-parse-line line))))))))
+                              (firewall-fold-line (firewall-line line))))))))
                 eof)))
       (_ #f))))
 
@@ -302,6 +317,9 @@
 ;;
 
 (module+ main
+  (command-line #:program "firewalld"
+                #:once-each
+                (("-c" "--config") path "Configuration file path" (current-configuration-path path)))
   (preflight)
   (main))
 
