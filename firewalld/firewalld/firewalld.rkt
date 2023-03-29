@@ -14,7 +14,8 @@
 (module+ test
   (require rackunit))
 
-(define current-configuration-path (make-parameter (path->complete-path "./config.rkt")))
+(define current-configurables (make-parameter (make-hasheq)))
+(define current-configuration-path (make-parameter (path->complete-path "config.rkt")))
 
 (define (config key (default #f))
   (with-handlers ((exn:fail? (lambda (exn) default)))
@@ -23,9 +24,11 @@
 (define-syntax (define-configurable stx)
   (syntax-parse stx
     ((_ key default)
-     (syntax (define key (make-derived-parameter (make-parameter (or (config 'key #f) default))
+     (syntax (begin
+               (define key (make-derived-parameter (make-parameter (or (config 'key #f) default))
                                                  values
-                                                 (lambda (value) (or (config 'key #f) value))))))))
+                                                 (lambda (value) (or (config 'key #f) value))))
+               (hash-set! (current-configurables) 'key key))))))
 
 (define-configurable current-http-address "127.0.0.1")
 (define-configurable current-http-port 5634)
@@ -282,8 +285,7 @@
                              #:listen-ip host
                              #:port port))))
       (thunk (for ((stop jobs)) (stop)))))
-  (define stop (start (current-http-address)
-                      (current-http-port)))
+  (define stop (start (current-http-address) (current-http-port)))
   (with-handlers ((exn:break? (thunk*
                                (displayln "stopping web server")
                                (stop))))
@@ -316,10 +318,11 @@
 
 ;;
 
-(module+ main
-  (command-line #:program "firewalld"
+(command-line #:program "firewalld"
                 #:once-each
-                (("-c" "--config") path "Configuration file path" (current-configuration-path path)))
+                (("-c" "--config") path "Configuration file path" (current-configuration-path (path->complete-path path))))
+
+(module+ main
   (preflight)
   (main))
 
