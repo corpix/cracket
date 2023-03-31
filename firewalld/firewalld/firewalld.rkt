@@ -14,12 +14,17 @@
 (module+ test
   (require rackunit))
 
-(define current-configurables (make-parameter (make-hasheq)))
+(define current-configuration (make-parameter #f))
 (define current-configuration-path (make-parameter (path->complete-path "config.rkt")))
+(define current-configurables (make-parameter (make-hasheq)))
 
 (define (config key (default #f))
-  (with-handlers ((exn:fail? (lambda (exn) default)))
-    (dynamic-require (current-configuration-path) key)))
+  (unless (current-configuration)
+    (current-configuration
+     (with-input-from-file (current-configuration-path)
+       (thunk (read)))))
+  (let ((value (assoc key (current-configuration))))
+    (if value (cdr value) default)))
 
 (define-syntax (define-configurable stx)
   (syntax-parse stx
@@ -207,7 +212,7 @@
 
 (define (worker port)
   (let* ((by-ip (make-prometheus-metric-counter 'firewall_refused_ip))
-         (by-ip-label-names (set "DPT" "DST" "IN" "MAC" "OUT" "PROTO" "SRC" "TOS"))
+         (by-ip-label-names (set "IN" "SRC"))
          (by-ip-limit (current-by-ip-limit))
          (banned (make-prometheus-metric-counter 'firewall_refused_ip_banned))
          (ttl (make-hasheq))
@@ -321,9 +326,12 @@
 (command-line #:program "firewalld"
                 #:once-each
                 (("-c" "--config") path "Configuration file path" (current-configuration-path (path->complete-path path))))
-
+(displayln (for/hasheq (((k v) (in-hash (current-configurables)))) (values k (v))))
+(displayln (list 'args (current-command-line-arguments)))
+(displayln (config 'current-http-address))
+(displayln (current-configuration-path))
 (module+ main
-  (preflight)
+  ;;(preflight)
   (main))
 
 ;;
