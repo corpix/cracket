@@ -326,12 +326,8 @@
 (command-line #:program "firewalld"
                 #:once-each
                 (("-c" "--config") path "Configuration file path" (current-configuration-path (path->complete-path path))))
-(displayln (for/hasheq (((k v) (in-hash (current-configurables)))) (values k (v))))
-(displayln (list 'args (current-command-line-arguments)))
-(displayln (config 'current-http-address))
-(displayln (current-configuration-path))
 (module+ main
-  ;;(preflight)
+  (preflight)
   (main))
 
 ;;
