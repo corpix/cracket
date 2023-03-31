@@ -29,11 +29,13 @@
 (define-syntax (define-configurable stx)
   (syntax-parse stx
     ((_ key default)
-     (syntax (begin
-               (define key (make-derived-parameter (make-parameter (or (config 'key #f) default))
-                                                 values
-                                                 (lambda (value) (or (config 'key #f) value))))
-               (hash-set! (current-configurables) 'key key))))))
+     (syntax
+      (begin
+        (define key
+          (make-derived-parameter
+           (make-parameter default) values
+           (lambda (value) (or (config 'key) value))))
+        (hash-set! (current-configurables) 'key key))))))
 
 (define-configurable current-http-address "127.0.0.1")
 (define-configurable current-http-port 5634)
