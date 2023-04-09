@@ -149,6 +149,17 @@
     ((_ (name rest ...) body0 bodyN ...)
      (let ((doc-datum (syntax->datum #'body0)))
        (with-syntax ((name-string (symbol->string (syntax->datum #'name)))
+                     (signature (let loop ((inner-stx #'(rest ...))
+                                           (acc null))
+                                  (if (pair? (syntax->datum inner-stx))
+                                      (syntax-parse inner-stx
+                                        (((~seq key:keyword _) rest ...)
+                                         (loop #'(rest ...) (append acc (list #`(keyword #,(string->symbol (keyword->string (syntax->datum #'key))))))))
+                                        (((key:id _) rest ...)
+                                         (loop #'(rest ...) (append acc (list #'(symbol key)))))
+                                        ((key:id rest ...)
+                                         (loop #'(rest ...) (append acc (list #'(symbol key))))))
+                                      acc)))
                      (doc (if (string? doc-datum)
                               (datum->syntax stx doc-datum)
                               #'#f))
@@ -156,10 +167,9 @@
                                      #'(bodyN ...)
                                      #'(body0 bodyN ...))))
          (syntax (begin
-                   (define (name rest ...)
-                     body ...)
+                   (define (name rest ...) body ...)
                    (hash-set! (current-jsonrpc-method-registry) name-string
-                              (make-jsonrpc-method 'name '(rest ...) doc name)))))))))
+                              (make-jsonrpc-method 'name 'signature doc name)))))))))
 
 (define (jsonrpc-apply method params)
   (let ((proc (jsonrpc-method-proc method)))
@@ -291,6 +301,15 @@
                         (current-jsonrpc-output-port (jsonrpc-client-out client)))
            body ...)))))
 
+(define-syntax (define-jsonrpc-introspection stx)
+  (syntax-parse stx
+    ((_ (~optional id #:defaults ((id #'introspect))))
+     #'(define-jsonrpc (id)
+         (for/hash (((name method) (current-jsonrpc-method-registry)))
+           (values name (make-hash `((name . ,(jsonrpc-method-name method))
+                                     (signature . ,(jsonrpc-method-signature method))
+                                     (doc . ,(jsonrpc-method-doc method))))))))))
+
 ;;
 
 ;; (define-jsonrpc (foo bar baz)
@@ -298,15 +317,22 @@
 ;;   (list bar baz))
 
 ;; (define-jsonrpc (foo-void bar baz)
+;;   "Proc which returns void"
 ;;   (displayln (list 'foo-void-called bar baz)))
 
 ;; (define-jsonrpc (bar #:baz baz #:qux (qux 'hello))
 ;;   (displayln (list 'bar-called baz qux))
 ;;   (make-hash `((baz . ,baz) (qux . ,qux))))
 
+;; (define-jsonrpc-introspection introspect)
+
+;; ;;(current-jsonrpc-method-registry)
+
 ;; (define stop (jsonrpc-tcp-serve "127.0.0.1" 9094))
 ;; (define client (jsonrpc-tcp-client "127.0.0.1" 9094))
-;; (with-jsonrpc client
-;;   (call-jsonrpc 'foo #:params '(1 2))
-;;   (call-jsonrpc 'foo-void #:params '(1 2))
-;;   (call-jsonrpc 'bar #:params (make-hash '((baz . 1)))))
+
+;; ;; (stop)
+;; ;; (close-jsonrpc-client client)
+
+;; (write-json (with-jsonrpc client
+;;   (call-jsonrpc 'introspect)))
