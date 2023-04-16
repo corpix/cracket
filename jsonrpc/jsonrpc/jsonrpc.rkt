@@ -1,10 +1,22 @@
 #lang racket
 (require racket/async-channel
          racket/tcp
+         syntax/srcloc
          corpix/json
          (for-syntax corpix/syntax))
 (module+ test
   (require rackunit))
+
+(define-syntax (make-required-parameter stx)
+  (syntax-parse stx
+    ((_ value error-message)
+     #'(make-derived-parameter (make-parameter value) values
+                               (lambda (v) (begin0 v (unless v (error error-message))))))))
+
+(define-for-syntax (keyword->symbol value)
+  (string->symbol (keyword->string value)))
+
+;;
 
 (define-syntax (make-jsonrpc-id-counter stx)
   (syntax-parse stx
@@ -36,22 +48,9 @@
 ;;
 
 (define jsonrpc-version "2.0")
-(define current-jsonrpc-input-port
-  (make-derived-parameter (make-parameter #f)
-                          values
-                          (lambda (port)
-                            (begin0 port
-                              (unless port (error "no input jsonrpc port is active"))))))
-
-(define current-jsonrpc-output-port
-  (make-derived-parameter (make-parameter #f)
-                          values
-                          (lambda (port)
-                            (begin0 port
-                              (unless port (error "no output jsonrpc port is active"))))))
-
+(define current-jsonrpc-input-port (make-required-parameter #f "no input jsonrpc port is active"))
+(define current-jsonrpc-output-port (make-required-parameter #f "no output jsonrpc port is active"))
 (define current-jsonrpc-id-generator (make-parameter (make-jsonrpc-id-counter)))
-
 (define current-jsonrpc-method-registry (make-parameter (make-hash)))
 (define current-jsonrpc-request-registry (make-parameter (make-jsonrpc-request-registry)))
 
@@ -146,19 +145,22 @@
 
 (define-syntax (define-jsonrpc stx)
   (syntax-parse stx
-    ((_ (name rest ...) (~optional body0 #:defaults ((body0 #'#f))) bodyN ...)
+    ((_ (name rest ...) (~optional body0 #:defaults ((body0 #'#f))) body-n ...)
      (let ((doc-datum (syntax->datum #'body0)))
        (with-syntax* ((name-string (symbol->string (syntax->datum #'name)))
-                      (signature (let loop ((inner-stx #'(rest ...))
+                      (signature (let loop ((argument-stx #'(rest ...))
                                             (acc null))
-                                   (if (pair? (syntax->datum inner-stx))
-                                       (syntax-parse inner-stx
+                                   (if (pair? (syntax->datum argument-stx))
+                                       (syntax-parse argument-stx
+                                         (((~seq key:keyword (_ default)) rest ...)
+                                          (loop #'(rest ...) (append acc (list #`(keyword (#,(keyword->symbol (syntax->datum #'key))
+                                                                                           default))))))
                                          (((~seq key:keyword _) rest ...)
-                                          (loop #'(rest ...) (append acc (list #`(keyword #,(string->symbol (keyword->string (syntax->datum #'key))))))))
-                                         (((key:id _) rest ...)
-                                          (loop #'(rest ...) (append acc (list #'(symbol key)))))
+                                          (loop #'(rest ...) (append acc (list #`(keyword (#,(keyword->symbol (syntax->datum #'key))))))))
+                                         (((key:id default) rest ...)
+                                          (loop #'(rest ...) (append acc (list #'(symbol (key default))))))
                                          ((key:id rest ...)
-                                          (loop #'(rest ...) (append acc (list #'(symbol key))))))
+                                          (loop #'(rest ...) (append acc (list #'(symbol (key)))))))
                                        acc)))
                       (params (let* ((key-id (lambda (stx) (syntax-parse stx
                                                              ((key _ ...) #'key)
@@ -172,13 +174,16 @@
                       (doc (if (string? doc-datum)
                                (datum->syntax stx doc-datum)
                                #'#f))
-                      ((body ...) (cond ((not (pair? (syntax->list #'(bodyN ...)))) #'((call-jsonrpc 'name #:params params)))
-                                        ((string? doc-datum) #'(bodyN ...))
-                                        (else #'(body0 bodyN ...)))))
-         (syntax (begin
-                   (define (name rest ...) body ...)
-                   (hash-set! (current-jsonrpc-method-registry) name-string
-                              (make-jsonrpc-method 'name 'signature doc name)))))))))
+                      ((body ...) (cond
+                                    ((and (eq? #f (syntax->datum #'body0))
+                                          (not (pair? (syntax->list #'(body-n ...)))))
+                                     #'((call-jsonrpc 'name #:params params)))
+                                    ((string? doc-datum) #'(body-n ...))
+                                    (else #'(body0 body-n ...)))))
+         #'(begin
+             (define (name rest ...) body ...)
+             (hash-set! (current-jsonrpc-method-registry) name-string
+                        (make-jsonrpc-method 'name 'signature doc name))))))))
 
 (define (jsonrpc-apply method params)
   (let ((proc (jsonrpc-method-proc method)))
@@ -206,14 +211,24 @@
   (let* ((id (hash-ref message "id"))
          (chan (call-with-semaphore
                 (jsonrpc-request-registry-sem registry)
-                (thunk (hash-ref (jsonrpc-request-registry-channels registry) id #f)))))
+                (thunk (hash-ref (jsonrpc-request-registry-channels registry) id #f))))
+         (default (gensym)))
     (unless chan
       (error (format "jsonrpc response dispatch failed, no response channel found for id ~a" id)))
-    (async-channel-put
-     chan
-     (or (hash-ref message "result" #f)
-         (make-exn:fail (hash-ref message "error")
-                        (current-continuation-marks))))))
+    (let ((result (hash-ref message "result" default))
+          (err (hash-ref message "error" default)))
+      (cond
+        ((not (eq? result default))
+         (async-channel-put chan result))
+        ((not (eq? err default))
+         (make-exn:fail (format "~a\nRemote context:\n~a"
+                                (hash-ref err "message")
+                                (string-join (map (lambda (line) (string-append "  " line))
+                                                  (hash-ref err "data"))
+                                             "\n"))
+                        (current-continuation-marks)))
+        (else (make-exn:fail (format "no result or error present in response: ~a" message)
+                             (current-continuation-marks)))))))
 
 (define (invoke-jsonrpc method (port (current-jsonrpc-output-port))
                         #:params (params null)
@@ -259,14 +274,22 @@
         (check-equal? (dispatch-jsonrpc-request (read-jsonrpc-request)) '(1 2))))))
 
 (define (dispatch-jsonrpc-requests (in (current-jsonrpc-input-port))
-                                (out (current-jsonrpc-output-port)))
+                                   (out (current-jsonrpc-output-port)))
   (let loop ()
     (let* ((request (read-jsonrpc-request in))
            (id (hash-ref request "id"))
            ;; TODO: bounded worker pool to dispatch requests concurrently
-           (result (with-handlers ((exn? identity)) (dispatch-jsonrpc-request request))))
+           (result (with-handlers ((exn? identity))
+                     (dispatch-jsonrpc-request request))))
       (if (exn? result)
-          (write-jsonrpc-response id out #:error (exn-message result)) ;; TODO: reconstruct continuation marks?
+          (write-jsonrpc-response
+           id out
+           #:error
+           (make-hasheq `((message . ,(exn-message result))
+                          (data . ,(map (lambda (kv)
+                                          (string-append (source-location->string (cdr kv)) " "
+                                                         (format "~a" (car kv))))
+                                        (continuation-mark-set->context (exn-continuation-marks result)))))))
           (write-jsonrpc-response id out #:result result)))
     (loop)))
 
@@ -276,11 +299,12 @@
     (loop)))
 
 (define (call-jsonrpc method
-                      (in (current-jsonrpc-input-port))
                       (out (current-jsonrpc-output-port))
                       #:params (params null))
-  (let* ((result (async-channel-get (invoke-jsonrpc method #:params params)))
-         (result (if (eq? result (current-json-null)) (void) result)))
+  (let* ((result (async-channel-get (invoke-jsonrpc method out #:params params)))
+         (result (if (eq? result (current-json-null))
+                     (void)
+                     result)))
     (begin0 result
       (when (exn? result)
         (raise result)))))
@@ -319,29 +343,41 @@
                                      (signature . ,(jsonrpc-method-signature method))
                                      (doc . ,(jsonrpc-method-doc method))))))))))
 
+(define (define-jsonrpc-from client)
+  (for ((method (hash-values (with-jsonrpc client (call-jsonrpc 'introspect)))))
+    (eval `(define-jsonrpc (,(string->symbol (hash-ref method "name"))
+                            ,@(for/fold ((acc null))
+                                        ((argument (in-list (hash-ref method "signature"))))
+                                (let ((kind (car argument))
+                                      (expr (cadr argument)))
+                                  (case kind
+                                    (("symbol") (append acc (list (if (> (length expr) 1)
+                                                                      (cons (string->symbol (car expr)) (cdr expr))
+                                                                      (string->symbol (car expr))))))
+                                    (("keyword") (append acc (list (string->keyword (car expr))
+                                                                   (if (> (length expr) 1)
+                                                                       (cons (string->symbol (car expr)) (cdr expr))
+                                                                       (string->symbol (car expr))))))))))))))
+
 ;;
 
-;; (define-jsonrpc (foo bar baz)
-;;   (displayln (list 'foo-called bar baz))
-;;   (list bar baz))
+;; FIXME: default values types (like symbols) are incompatible with json
 
-;; (define-jsonrpc (foo-void bar baz)
-;;   "Proc which returns void"
-;;   (displayln (list 'foo-void-called bar baz)))
-
-;; (define-jsonrpc (bar #:baz baz #:qux (qux 'hello))
+;; (define-jsonrpc (bar #:baz baz #:qux (qux "hello"))
 ;;   (displayln (list 'bar-called baz qux))
 ;;   (make-hash `((baz . ,baz) (qux . ,qux))))
 
-;; (define-jsonrpc-introspection introspect)
-
-;; ;;(current-jsonrpc-method-registry)
+;; ;;
 
 ;; (define stop (jsonrpc-tcp-serve "127.0.0.1" 9094))
 ;; (define client (jsonrpc-tcp-client "127.0.0.1" 9094))
 
+;; (define-jsonrpc-introspection introspect)
+;; (parameterize ((current-jsonrpc-method-registry (make-hash)))
+;;   (define-jsonrpc-from client)
+;;   (with-jsonrpc client (displayln (bar #:baz 1))))
+
+;; ;;
+
 ;; (stop)
 ;; (close-jsonrpc-client client)
-
-;; (write-json (with-jsonrpc client
-;;               (call-jsonrpc 'introspect)))
