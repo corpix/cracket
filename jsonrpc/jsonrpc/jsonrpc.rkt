@@ -343,8 +343,8 @@
                                      (signature . ,(jsonrpc-method-signature method))
                                      (doc . ,(jsonrpc-method-doc method))))))))))
 
-(define (define-jsonrpc-from client)
-  (for ((method (hash-values (with-jsonrpc client (call-jsonrpc 'introspect)))))
+(define (define-jsonrpc-from client (introspection-method 'introspect))
+  (for ((method (hash-values (with-jsonrpc client (call-jsonrpc introspection-method)))))
     (eval `(define-jsonrpc (,(string->symbol (hash-ref method "name"))
                             ,@(for/fold ((acc null))
                                         ((argument (in-list (hash-ref method "signature"))))
