@@ -4,8 +4,24 @@
          syntax/srcloc
          corpix/json
          (for-syntax corpix/syntax))
+(provide define-jsonrpc
+         current-jsonrpc-input-port
+         current-jsonrpc-output-port
+         current-jsonrpc-id-generator
+         current-jsonrpc-method-registry
+         current-jsonrpc-request-registry
+         use-jsonrpc-reflection
+         (except-out (struct-out jsonrpc-server) -make-jsonrpc-server)
+         (except-out (struct-out jsonrpc-client) -make-jsonrpc-client)
+         close-jsonrpc-server
+         close-jsonrpc-client
+         jsonrpc-tcp-serve
+         jsonrpc-tcp-client
+         with-jsonrpc)
 (module+ test
   (require rackunit))
+
+(define-namespace-anchor ns-anchor)
 
 (define-syntax (make-required-parameter stx)
   (syntax-parse stx
@@ -35,8 +51,16 @@
   #:constructor-name -make-jsonrpc-request-registry
   #:transparent)
 
-(define-struct jsonrpc-client (in out closer)
+(define-struct jsonrpc-server (closer)
+  #:constructor-name -make-jsonrpc-server
   #:transparent)
+
+(define-struct jsonrpc-client (in out closer)
+  #:constructor-name -make-jsonrpc-client
+  #:transparent)
+
+(define (close-jsonrpc-server server)
+  ((jsonrpc-server-closer server)))
 
 (define (close-jsonrpc-client client)
   ((jsonrpc-client-closer client)))
@@ -53,8 +77,20 @@
 (define current-jsonrpc-id-generator (make-parameter (make-jsonrpc-id-counter)))
 (define current-jsonrpc-method-registry (make-parameter (make-hash)))
 (define current-jsonrpc-request-registry (make-parameter (make-jsonrpc-request-registry)))
+(define use-jsonrpc-reflection (make-parameter #t))
 
 ;;
+
+(define (make-jsonrpc-server closer)
+  (when (use-jsonrpc-reflection)
+    (define-jsonrpc-reflection))
+  (-make-jsonrpc-server closer))
+
+(define (make-jsonrpc-client in out closer)
+  (let ((client (-make-jsonrpc-client in out closer)))
+    (begin0 client
+      (when (use-jsonrpc-reflection)
+        (define-jsonrpc-from client)))))
 
 (define (write-jsonrpc-message id payload (port (current-jsonrpc-output-port)))
   (write-json (make-hasheq `((jsonrpc . ,jsonrpc-version) (id . ,id) ,@payload)) port)
@@ -309,19 +345,22 @@
       (when (exn? result)
         (raise result)))))
 
+(define (make-jsonrpc-dispatcher acceptor #:request-dispatcher (request-dispatcher dispatch-jsonrpc-requests))
+  (thunk (let-values (((in out) (acceptor)))
+           (request-dispatcher in out))))
+
 (define (jsonrpc-tcp-serve host port
-                           #:dispatcher (dispatcher dispatch-jsonrpc-requests)
+                           #:dispatcher-maker (dispatcher-maker make-jsonrpc-dispatcher)
                            #:backlog (backlog 128)
                            #:reuse? (reuse? #t))
   (let* ((listener (tcp-listen port backlog reuse? host))
-         (conn-dispatcher (thunk (let-values (((in out) (tcp-accept listener)))
-                                   (dispatcher in out))))
+         (conn-dispatcher (dispatcher-maker (thunk (tcp-accept listener))))
          (conn-dispatcher-thread (thread conn-dispatcher)))
-    (thunk (kill-thread conn-dispatcher-thread)
-           (tcp-close listener))))
+    (make-jsonrpc-server (thunk (kill-thread conn-dispatcher-thread)
+                                (tcp-close listener)))))
 
 (define (jsonrpc-tcp-client host port
-                          #:dispatcher (dispatcher dispatch-jsonrpc-responses))
+                            #:dispatcher (dispatcher dispatch-jsonrpc-responses))
   (let*-values (((in out) (tcp-connect host port))
                 ((conn-dispatcher-thread) (thread (thunk (dispatcher in)))))
     (make-jsonrpc-client in out (thunk (kill-thread conn-dispatcher-thread)))))
@@ -334,17 +373,17 @@
                         (current-jsonrpc-output-port (jsonrpc-client-out client)))
            body ...)))))
 
-(define-syntax (define-jsonrpc-introspection stx)
+(define-syntax (define-jsonrpc-reflection stx)
   (syntax-parse stx
-    ((_ (~optional id #:defaults ((id #'introspect))))
+    ((_ (~optional id #:defaults ((id #'reflection))))
      #'(define-jsonrpc (id)
          (for/hash (((name method) (current-jsonrpc-method-registry)))
            (values name (make-hash `((name . ,(jsonrpc-method-name method))
                                      (signature . ,(jsonrpc-method-signature method))
                                      (doc . ,(jsonrpc-method-doc method))))))))))
 
-(define (define-jsonrpc-from client (introspection-method 'introspect))
-  (for ((method (hash-values (with-jsonrpc client (call-jsonrpc introspection-method)))))
+(define (define-jsonrpc-from client (reflection-method 'reflection))
+  (for ((method (hash-values (with-jsonrpc client (call-jsonrpc reflection-method)))))
     (eval `(define-jsonrpc (,(string->symbol (hash-ref method "name"))
                             ,@(for/fold ((acc null))
                                         ((argument (in-list (hash-ref method "signature"))))
@@ -357,11 +396,12 @@
                                     (("keyword") (append acc (list (string->keyword (car expr))
                                                                    (if (> (length expr) 1)
                                                                        (cons (string->symbol (car expr)) (cdr expr))
-                                                                       (string->symbol (car expr))))))))))))))
+                                                                       (string->symbol (car expr)))))))))))
+          (namespace-anchor->namespace ns-anchor))))
 
 ;;
 
-;; FIXME: default values types (like symbols) are incompatible with json
+;; (require corpix/jsonrpc)
 
 ;; (define-jsonrpc (bar #:baz baz #:qux (qux "hello"))
 ;;   (displayln (list 'bar-called baz qux))
@@ -369,15 +409,10 @@
 
 ;; ;;
 
-;; (define stop (jsonrpc-tcp-serve "127.0.0.1" 9094))
+;; (define server (jsonrpc-tcp-serve "127.0.0.1" 9094))
 ;; (define client (jsonrpc-tcp-client "127.0.0.1" 9094))
 
-;; (define-jsonrpc-introspection introspect)
-;; (parameterize ((current-jsonrpc-method-registry (make-hash)))
-;;   (define-jsonrpc-from client)
-;;   (with-jsonrpc client (displayln (bar #:baz 1))))
+;; (with-jsonrpc client (displayln (bar #:baz 1)))
 
-;; ;;
-
-;; (stop)
+;; (close-jsonrpc-server server)
 ;; (close-jsonrpc-client client)
