@@ -15,7 +15,53 @@
          (except-in net/url http-connection?)
          (only-in corpix/url current-url-scheme-port-dispatcher) ;; FIXME: move to corpix/url everywhere, for now this is for compat reasons
          (only-in openssl ssl-port? ssl-connect ssl-addresses))
-(provide (all-defined-out))
+(provide websocket-protocol-name
+         websocket-version
+         websocket-magic
+
+         current-websocket-stream-buffer-size
+         current-websocket-idle-timeout
+         current-connection-manager
+
+         websocket-frame-continuation
+         websocket-frame-text
+         websocket-frame-binary
+         websocket-frame-connection-close
+         websocket-frame-ping
+         websocket-frame-pong
+         websocket-status-normal-closure
+         websocket-status-going-away
+         websocket-status-protocol-error
+         websocket-status-unsupported-data
+         websocket-status-reserved
+         websocket-status-no-status-received
+         websocket-status-abnormal-closure
+         websocket-status-invalid-frame-payload
+         websocket-status-policy-violation
+         websocket-status-message-too-big
+         websocket-status-internal-server-error
+         websocket-status-service-restart
+         websocket-status-try-again-later
+         websocket-status-unauthorized
+
+         (struct-out websocket-connection)
+         (struct-out websocket-protocol-frame)
+         websocket-service-mapper
+
+         websocket-send
+         websocket-next-frame
+         websocket-receive
+         websocket-close
+         make-websocket-dispatcher
+         make-websocket-service-dispatcher
+         websocket-http-transport-maker
+         websocket-url-scheme-port-dispatcher
+         websocket-http-hijacker
+         websocket-connect
+         make-websocket-input-port
+         make-websocket-output-port
+         websocket-serve
+         websocket-serve*)
 (module+ test
   (require rackunit))
 
@@ -26,6 +72,7 @@
 (define websocket-protocol-name #"websocket")
 (define websocket-version 13) ;; NOTE: see https://www.iana.org/assignments/websocket/websocket.xml#version-number
 (define websocket-magic #"258EAFA5-E914-47DA-95CA-C5AB0DC85B11") ;; NOTE: see https://www.rfc-editor.org/rfc/rfc6455
+
 (define current-websocket-stream-buffer-size (make-parameter 65536))
 (define current-websocket-idle-timeout (make-parameter 60))
 (define current-connection-manager (make-parameter (start-connection-manager)))
@@ -82,6 +129,9 @@
         (i (in-naturals)))
     (bytes-set! result i (bitwise-xor b k)))
   result)
+
+(define (not-ready-evt port (value 0))
+  (handle-evt port (thunk* value)))
 
 ;; FIXME: refactor names
 (define (random-key-string)
@@ -194,7 +244,8 @@
             ((= v 126) (read-int 2 p)) ;; FIXME: eliminate magic numbers
             ((= v 127) (read-int 8 p))
             (else v)))))
-  (define masked? (and (not (eof-object? mask+payload-len)) (bitwise-bit-set? mask+payload-len 7)))
+  (define masked? (and (not (eof-object? mask+payload-len))
+                       (bitwise-bit-set? mask+payload-len 7)))
   (define masking-key (and masked? (read-bytes 4 p)))
   (define masked-payload (read-bytes payload-len p))
   (define payload (if (and masked?
@@ -465,6 +516,35 @@
 
 ;;
 
+(define (make-websocket-input-port connection #:on-close (on-close websocket-close))
+  (let ((message #f)
+        (message-position 0))
+    (define (do-read buf)
+      (unless message
+        (set! message (websocket-receive connection #:payload-type 'binary))
+        (set! message-position 0))
+      (if (eof-object? message) eof
+          (let ((limit (min (- (bytes-length message) message-position)
+                            (bytes-length buf))))
+            (begin0 limit
+              (bytes-copy! buf 0 message message-position limit)
+              (set! message-position (+ message-position limit))
+              (when (= (bytes-length message) message-position)
+                (set! message #f))))))
+    (make-input-port (object-name (websocket-connection-in connection)) do-read #f
+                     (thunk (on-close connection)))))
+
+(define (make-websocket-output-port connection #:on-close (on-close websocket-close))
+  (define (do-write buf start end)
+    (begin0 (- end start)
+      (websocket-send connection (subbytes buf start end)
+                      #:payload-type 'binary)))
+  (make-output-port (object-name (websocket-connection-out connection)) always-evt
+                    (lambda (buf start end non-block? breakable?) (do-write buf start end))
+                    (thunk (on-close connection))))
+
+;;
+
 (define (exn-handler-middleware proc)
   (lambda (connection req)
     (with-handlers ((exn:dispatcher?
@@ -505,9 +585,3 @@
 		     (cons (exn-handler-middleware (make-websocket-service-dispatcher service-mapper)) vals)
 		     rest)))
    'websocket-serve*))
-
-;;
-
-(define (bytes-split bs) ;; FIXME: do we have a generic helper for this?
-  (map string->bytes/latin-1
-       (string-split (bytes->string/latin-1 bs))))
