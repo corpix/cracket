@@ -3,6 +3,7 @@
          racket/tcp
          syntax/srcloc
          corpix/json
+         corpix/websocket
          (for-syntax corpix/syntax))
 (provide define-jsonrpc
          current-jsonrpc-input-port
@@ -17,6 +18,8 @@
          close-jsonrpc-client
          jsonrpc-tcp-serve
          jsonrpc-tcp-client
+         jsonrpc-websocket-serve
+         jsonrpc-websocket-client
          with-jsonrpc)
 (module+ test
   (require rackunit))
@@ -345,9 +348,13 @@
       (when (exn? result)
         (raise result)))))
 
+;; FIXME: dispatchers are messy, make them right!
+
 (define (make-jsonrpc-dispatcher acceptor #:request-dispatcher (request-dispatcher dispatch-jsonrpc-requests))
   (thunk (let-values (((in out) (acceptor)))
            (request-dispatcher in out))))
+
+;;
 
 (define (jsonrpc-tcp-serve host port
                            #:dispatcher-maker (dispatcher-maker make-jsonrpc-dispatcher)
@@ -364,6 +371,28 @@
   (let*-values (((in out) (tcp-connect host port))
                 ((conn-dispatcher-thread) (thread (thunk (dispatcher in)))))
     (make-jsonrpc-client in out (thunk (kill-thread conn-dispatcher-thread)))))
+
+;;
+
+(define (jsonrpc-websocket-serve host port
+                                 #:request-dispatcher (request-dispatcher dispatch-jsonrpc-requests))
+  (let* ((handler (lambda (connection state)
+                    (let-values (((in out) (values (make-websocket-input-port connection)
+                                                   (make-websocket-output-port connection))))
+                      (request-dispatcher in out))))
+         (closer (websocket-serve #:listen-ip host #:port port handler)))
+    (make-jsonrpc-server closer)))
+
+(define (jsonrpc-websocket-client url
+                                  #:dispatcher (dispatcher dispatch-jsonrpc-responses))
+  (let*-values (((connection) (websocket-connect url))
+                ((in out) (values (make-websocket-input-port connection)
+                                  (make-websocket-output-port connection)))
+                ((conn-dispatcher-thread) (thread (thunk (dispatcher in)))))
+    (make-jsonrpc-client in out (thunk (websocket-close connection)
+                                       (kill-thread conn-dispatcher-thread)))))
+
+;;
 
 (define-syntax (with-jsonrpc stx)
   (syntax-parse stx
