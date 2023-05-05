@@ -80,7 +80,7 @@
 (define current-jsonrpc-id-generator (make-parameter (make-jsonrpc-id-counter)))
 (define current-jsonrpc-method-registry (make-parameter (make-hash)))
 (define current-jsonrpc-request-registry (make-parameter (make-jsonrpc-request-registry)))
-(define use-jsonrpc-reflection (make-parameter #t))
+(define use-jsonrpc-reflection (make-parameter #f))
 
 ;;
 
@@ -96,16 +96,34 @@
         (define-jsonrpc-from client)))))
 
 (define (write-jsonrpc-message id payload (port (current-jsonrpc-output-port)))
-  (write-json (make-hasheq `((jsonrpc . ,jsonrpc-version) (id . ,id) ,@payload)) port)
+  (write-bytes
+   ;; NOTE: writing as a single message
+   ;; this will help ports like websocket port
+   ;; to work correctly (websocket port wrap each write into separate frame)
+   (json->bytes (make-hasheq `((jsonrpc . ,jsonrpc-version) (id . ,id) ,@payload)))
+   port)
   (flush-output port))
 
 (define (write-jsonrpc-request method (port (current-jsonrpc-output-port))
-                               #:params (params #f)
+                               #:params (params null)
                                #:next-id (next-id (current-jsonrpc-id-generator)))
   (let ((id (next-id)))
     (begin0 id
       (let* ((payload `((method . ,method)))
-             (payload (if params (cons `(params . ,params) payload) payload)))
+             (payload (cond
+                        ((pair? params)
+                         (cons `(params . ,(for/list ((param (in-list params)))
+                                             #:break (void? param)
+                                             param))
+                               payload))
+                        ((hash? params)
+                         (cons `(params . ,(for/fold ((acc (make-hash)))
+                                                     (((key value) (in-hash params)))
+                                             (begin0 acc
+                                               (unless (void? value)
+                                                 (hash-set! acc key value)))))
+                               payload))
+                        (else payload))))
         (write-jsonrpc-message id payload port)))))
 
 (define (write-jsonrpc-response id (port (current-jsonrpc-output-port))
@@ -184,45 +202,43 @@
 
 (define-syntax (define-jsonrpc stx)
   (syntax-parse stx
-    ((_ (name rest ...) (~optional body0 #:defaults ((body0 #'#f))) body-n ...)
-     (let ((doc-datum (syntax->datum #'body0)))
-       (with-syntax* ((name-string (symbol->string (syntax->datum #'name)))
-                      (signature (let loop ((argument-stx #'(rest ...))
-                                            (acc null))
-                                   (if (pair? (syntax->datum argument-stx))
-                                       (syntax-parse argument-stx
-                                         (((~seq key:keyword (_ default)) rest ...)
-                                          (loop #'(rest ...) (append acc (list #`(keyword (#,(keyword->symbol (syntax->datum #'key))
-                                                                                           default))))))
-                                         (((~seq key:keyword _) rest ...)
-                                          (loop #'(rest ...) (append acc (list #`(keyword (#,(keyword->symbol (syntax->datum #'key))))))))
-                                         (((key:id default) rest ...)
-                                          (loop #'(rest ...) (append acc (list #'(symbol (key default))))))
-                                         ((key:id rest ...)
-                                          (loop #'(rest ...) (append acc (list #'(symbol (key)))))))
-                                       acc)))
-                      (params (let* ((key-id (lambda (stx) (syntax-parse stx
-                                                             ((key _ ...) #'key)
-                                                             (key #'key))))
-                                     (extract-params (lambda (stx) (map key-id (syntax->list stx)))))
-                                (syntax-parse #'(rest ...)
-                                  (((~seq _:keyword value) ...)
-                                   #`(make-hasheq (list #,@(map (lambda (param) `(cons ',param ,param))
-                                                                (extract-params #'(value ...))))))
-                                  ((value ...) #`(list #,@(extract-params #'(value ...)))))))
-                      (doc (if (string? doc-datum)
-                               (datum->syntax stx doc-datum)
-                               #'#f))
-                      ((body ...) (cond
-                                    ((and (eq? #f (syntax->datum #'body0))
-                                          (not (pair? (syntax->list #'(body-n ...)))))
-                                     #'((call-jsonrpc 'name #:params params)))
-                                    ((string? doc-datum) #'(body-n ...))
-                                    (else #'(body0 body-n ...)))))
-         #'(begin
-             (define (name rest ...) body ...)
-             (hash-set! (current-jsonrpc-method-registry) name-string
-                        (make-jsonrpc-method 'name 'signature doc name))))))))
+    ((_ (name rest ...)
+        (~optional (~seq #:method method) #:defaults ((method #'#f)))
+        (~optional (~seq #:doc doc) #:defaults ((doc #'#f)))
+        body ...)
+     (with-syntax* ((method-name (or (syntax->datum #'method)
+                                     (syntax->datum #'name)))
+                    (signature (let loop ((argument-stx #'(rest ...))
+                                          (acc null))
+                                 (if (pair? (syntax->datum argument-stx))
+                                     (syntax-parse argument-stx
+                                       (((~seq key:keyword (_ default)) rest ...)
+                                        (loop #'(rest ...) (append acc (list #`(keyword (#,(keyword->symbol (syntax->datum #'key))
+                                                                                         default))))))
+                                       (((~seq key:keyword _) rest ...)
+                                        (loop #'(rest ...) (append acc (list #`(keyword (#,(keyword->symbol (syntax->datum #'key))))))))
+                                       (((key:id default) rest ...)
+                                        (loop #'(rest ...) (append acc (list #'(symbol (key default))))))
+                                       ((key:id rest ...)
+                                        (loop #'(rest ...) (append acc (list #'(symbol (key)))))))
+                                     acc)))
+                    (params (let* ((key-id (lambda (stx) (syntax-parse stx
+                                                           ((key _ ...) #'key)
+                                                           (key #'key))))
+                                   (extract-params (lambda (stx) (map key-id (syntax->list stx)))))
+                              (syntax-parse #'(rest ...)
+                                (((~seq _:keyword value) ...)
+                                 #`(make-hasheq (list #,@(map (lambda (param) `(cons ',param ,param))
+                                                              (extract-params #'(value ...))))))
+                                ((value ...) #`(list #,@(extract-params #'(value ...)))))))
+                    ((method-body ...) (cond
+                                         ((not (pair? (syntax->list #'(body ...)))) #'((call-jsonrpc 'method-name #:params params)))
+                                         (else #'(body ...)))))
+       #'(begin
+           (define (name rest ...) method-body ...)
+           (hash-set! (current-jsonrpc-method-registry)
+                      (symbol->string 'method-name)
+                      (make-jsonrpc-method 'method-name 'signature doc name)))))))
 
 (define (jsonrpc-apply method params)
   (let ((proc (jsonrpc-method-proc method)))
@@ -245,8 +261,7 @@
       (error (format "method ~s is not defined" method-name)))
     (jsonrpc-apply method-descriptor params)))
 
-(define (dispatch-jsonrpc-response message
-                                   #:request-registry (registry (current-jsonrpc-request-registry)))
+(define (dispatch-jsonrpc-response message #:request-registry (registry (current-jsonrpc-request-registry)))
   (let* ((id (hash-ref message "id"))
          (chan (call-with-semaphore
                 (jsonrpc-request-registry-sem registry)
@@ -260,14 +275,24 @@
         ((not (eq? result default))
          (async-channel-put chan result))
         ((not (eq? err default))
-         (make-exn:fail (format "~a\nRemote context:\n~a"
-                                (hash-ref err "message")
-                                (string-join (map (lambda (line) (string-append "  " line))
-                                                  (hash-ref err "data"))
-                                             "\n"))
-                        (current-continuation-marks)))
-        (else (make-exn:fail (format "no result or error present in response: ~a" message)
-                             (current-continuation-marks)))))))
+         (async-channel-put
+          chan
+          (make-exn:fail (string-append
+                          "Remote error: "
+                          (hash-ref err "message")
+                          (let ((data (hash-ref err "data" #f)))
+                            (if data
+                                (format "\nRemote context:\n~a"
+                                        (string-join
+                                         (map (lambda (line) (string-append "  " line))
+                                              data)
+                                         "\n"))
+                                "")))
+                         (current-continuation-marks))))
+        (else (async-channel-put
+               chan
+               (make-exn:fail (format "no result or error present in response: ~a" message)
+                              (current-continuation-marks))))))))
 
 (define (invoke-jsonrpc method (port (current-jsonrpc-output-port))
                         #:params (params null)
@@ -299,7 +324,16 @@
                     (make-immutable-hash '(("id" . 777)
                                            ("jsonrpc" . "2.0")
                                            ("method" . "foo")
-                                           ("params" . #hash(("bar" . 1) ("baz" . 2))))))))
+                                           ("params" . #hash(("bar" . 1) ("baz" . 2)))))))
+    (let ((out (open-output-string)))
+      (parameterize ((current-jsonrpc-id-generator (make-jsonrpc-id-counter 777))
+                     (current-jsonrpc-request-registry (make-jsonrpc-request-registry)))
+        (invoke-jsonrpc 'foo out #:params (make-hash `((bar . 1313) (baz . 666) (qux . ,(void))))))
+      (check-equal? (read-json (open-input-string (get-output-string out)))
+                    (make-immutable-hash '(("id" . 777)
+                                           ("jsonrpc" . "2.0")
+                                           ("method" . "foo")
+                                           ("params" . #hash(("bar" . 1313) ("baz" . 666))))))))
   (test-case "dispatch-jsonrpc-request"
     (parameterize ((current-jsonrpc-output-port (open-output-string))
                    (current-jsonrpc-id-generator (make-jsonrpc-id-counter 777))
@@ -348,11 +382,9 @@
       (when (exn? result)
         (raise result)))))
 
-;; FIXME: dispatchers are messy, make them right!
-
-(define (make-jsonrpc-dispatcher acceptor #:request-dispatcher (request-dispatcher dispatch-jsonrpc-requests))
+(define (make-jsonrpc-dispatcher acceptor #:dispatcher (dispatcher dispatch-jsonrpc-requests))
   (thunk (let-values (((in out) (acceptor)))
-           (request-dispatcher in out))))
+           (dispatcher in out))))
 
 ;;
 
@@ -366,28 +398,25 @@
     (make-jsonrpc-server (thunk (kill-thread conn-dispatcher-thread)
                                 (tcp-close listener)))))
 
-(define (jsonrpc-tcp-client host port
-                            #:dispatcher (dispatcher dispatch-jsonrpc-responses))
+(define (jsonrpc-tcp-client host port #:dispatcher (dispatcher dispatch-jsonrpc-responses))
   (let*-values (((in out) (tcp-connect host port))
                 ((conn-dispatcher-thread) (thread (thunk (dispatcher in)))))
     (make-jsonrpc-client in out (thunk (kill-thread conn-dispatcher-thread)))))
 
 ;;
 
-(define (jsonrpc-websocket-serve host port
-                                 #:request-dispatcher (request-dispatcher dispatch-jsonrpc-requests))
+(define (jsonrpc-websocket-serve host port #:dispatcher (dispatcher dispatch-jsonrpc-requests))
   (let* ((handler (lambda (connection state)
-                    (let-values (((in out) (values (make-websocket-input-port connection)
-                                                   (make-websocket-output-port connection))))
-                      (request-dispatcher in out))))
+                    (let-values (((in out) (values (websocket-connection-in connection)
+                                                   (websocket-connection-out connection))))
+                      (dispatcher in out))))
          (closer (websocket-serve #:listen-ip host #:port port handler)))
     (make-jsonrpc-server closer)))
 
-(define (jsonrpc-websocket-client url
-                                  #:dispatcher (dispatcher dispatch-jsonrpc-responses))
+(define (jsonrpc-websocket-client url #:dispatcher (dispatcher dispatch-jsonrpc-responses))
   (let*-values (((connection) (websocket-connect url))
-                ((in out) (values (make-websocket-input-port connection)
-                                  (make-websocket-output-port connection)))
+                ((in out) (values (websocket-connection-in connection)
+                                  (websocket-connection-out connection)))
                 ((conn-dispatcher-thread) (thread (thunk (dispatcher in)))))
     (make-jsonrpc-client in out (thunk (websocket-close connection)
                                        (kill-thread conn-dispatcher-thread)))))
