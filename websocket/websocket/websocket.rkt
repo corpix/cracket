@@ -29,6 +29,14 @@
          websocket-frame-connection-close
          websocket-frame-ping
          websocket-frame-pong
+
+         websocket-payload-text
+         websocket-payload-binary
+         websocket-payload-continuation
+
+         websocket-frame-type-to-payload-type
+         websocket-payload-type-to-frame-type
+
          websocket-status-normal-closure
          websocket-status-going-away
          websocket-status-protocol-error
@@ -45,6 +53,8 @@
          websocket-status-unauthorized
 
          (struct-out websocket-connection)
+         websocket-connection-in
+         websocket-connection-out
          (struct-out websocket-protocol-frame)
          websocket-service-mapper
 
@@ -84,6 +94,22 @@
 (define websocket-frame-ping 9)
 (define websocket-frame-pong 10)
 
+(define websocket-payload-text 'text)
+(define websocket-payload-binary 'binary)
+(define websocket-payload-continuation 'continuation)
+
+(define websocket-payload-type-to-frame-type
+  (make-hash
+   `((,websocket-payload-continuation . ,websocket-frame-continuation)
+     (,websocket-payload-text . ,websocket-frame-text)
+     (,websocket-payload-binary . ,websocket-frame-binary))))
+
+(define websocket-frame-type-to-payload-type
+  (make-hash
+   `((,websocket-frame-continuation . ,websocket-payload-continuation)
+     (,websocket-frame-text . ,websocket-payload-text)
+     (,websocket-frame-binary . ,websocket-payload-binary))))
+
 (define websocket-status-normal-closure 1000)
 (define websocket-status-going-away 1001)
 (define websocket-status-protocol-error 1002)
@@ -105,9 +131,17 @@
    path
    headers
    socket
-   in out)
-  #:property prop:evt (struct-field-index in)
+   -in -out)
+  #:property prop:evt (struct-field-index -in)
   #:transparent)
+
+(define (websocket-connection-in connection)
+  (make-websocket-input-port connection))
+
+(define (websocket-connection-out connection)
+  (make-websocket-output-port connection))
+
+;;
 
 (define-struct websocket-protocol-frame
   (final? opcode payload)
@@ -298,31 +332,28 @@
 
 (define (websocket-send connection payload
                         #:final-fragment? (final-fragment? #t)
-                        #:payload-type (payload-type 'text) ;; FIXME: we have a constants for frame types, do we need this to be a symbol (I mean: value)?
+                        #:payload-type (payload-type websocket-payload-text)
                         #:flush? (flush? #t))
   (unless (websocket-connection-closed? connection)
     (let ((opcode
-           (match payload-type
-             ('continuation websocket-frame-continuation)
-             ('text websocket-frame-text)
-             ('binary websocket-frame-binary)
-             (_ (error 'websocket-send "unsupported payload type: ~v" payload-type)))))
+           (or (hash-ref websocket-payload-type-to-frame-type payload-type #f)
+               (error 'websocket-send "unsupported payload type: ~v" payload-type))))
       (if (input-port? payload)
           (stream-frames payload opcode final-fragment?
-                         (websocket-connection-out connection)
+                         (websocket-connection--out connection)
                          (websocket-connection-mask? connection))
           (let ((payload-bytes (cond
                                  ((bytes? payload) payload)
                                  ((string? payload) (string->bytes/utf-8 payload))
                                  (else (error 'websocket-send "unsupported payload: ~v" payload)))))
             (write-frame (make-websocket-protocol-frame final-fragment? opcode payload-bytes)
-                         (websocket-connection-out connection)
+                         (websocket-connection--out connection)
                          (websocket-connection-mask? connection)))))
     (when flush?
-      (flush-output (websocket-connection-out connection)))))
+      (flush-output (websocket-connection--out connection)))))
 
 (define (websocket-next-frame connection)
-  (match (read-frame (websocket-connection-in connection))
+  (match (read-frame (websocket-connection--in connection))
     ((? eof-object? f) f)
     ((and f (websocket-protocol-frame final? opcode payload))
      (reset-connection-timeout! (websocket-connection-socket connection))
@@ -334,13 +365,13 @@
        ((eq? opcode websocket-frame-connection-close)
         (unless (websocket-connection-closed? connection)
           (write-frame (make-websocket-protocol-frame #t 8 #"")
-                       (websocket-connection-out connection)
+                       (websocket-connection--out connection)
                        (websocket-connection-mask? connection))
           (set-websocket-connection-closed?! connection #t))
         eof)
        ((eq? opcode websocket-frame-ping)
         (write-frame (make-websocket-protocol-frame #t 10 payload)
-                     (websocket-connection-out connection)
+                     (websocket-connection--out connection)
                      (websocket-connection-mask? connection))
         (websocket-next-frame connection))
        ((eq? opcode websocket-frame-pong)
@@ -352,46 +383,22 @@
         eof)))))
 
 (define (websocket-receive connection
-                           #:stream? (stream? #f)
-                           #:payload-type (payload-type 'auto))
-  (with-handlers ((exn:fail? (lambda (e) 'ignore)))
-    (flush-output (websocket-connection-out connection)))
-  (if stream?
-      (let-values (((in out) (make-pipe)))
-        (thread (thunk
-                 (let loop ()
-                   (if (websocket-connection-closed? connection)
-                       (close-output-port out)
-                       (match (websocket-next-frame connection)
-                         ((? eof-object?) (close-output-port out))
-                         ((websocket-protocol-frame final? opcode payload)
-                          (write-bytes payload out)
-                          (if final?
-                              (close-output-port out)
-                              (loop))))))))
-        in)
-      (let loop ((acc null)
-                 (converter (case payload-type
-                              ((text) bytes->string/utf-8)
-                              ((binary) values)
-                              ((auto) #f)
-                              (else (error 'websocket-receive
-                                           "unsupported payload type: ~v"
-                                           payload-type)))))
-        (if (websocket-connection-closed? connection)
-            eof
-            (match (websocket-next-frame connection)
-              ((? eof-object?) eof)
-              ((websocket-protocol-frame final? opcode payload)
-               ((if final?
-                    (lambda (acc converter)
-                      (converter (apply bytes-append (reverse acc))))
-                    loop)
-                (cons payload acc)
-                (or converter (cond
-                                ((eq? opcode websocket-frame-text) bytes->string/utf-8)
-                                ((eq? opcode websocket-frame-binary) values)
-                                (else #f))))))))))
+                           #:payload-type (payload-type websocket-payload-text))
+  (let ((expected-opcode (or (hash-ref websocket-payload-type-to-frame-type payload-type #f)
+                             (error 'websocket-receive "unsupported payload type: ~v" payload-type))))
+    (let loop ((acc #""))
+      (if (websocket-connection-closed? connection)
+          eof
+          (match (websocket-next-frame connection)
+            ((? eof-object?) eof)
+            ((websocket-protocol-frame final? opcode payload)
+             (unless (equal? opcode expected-opcode)
+               (error 'websocket-receive
+                      "unexpected opcode ~v, expected ~v for ~v payload type"
+                      opcode expected-opcode payload-type))
+             (if final?
+                 (bytes-append acc payload)
+                 (loop (bytes-append acc payload)))))))))
 
 (define (websocket-close connection
                          #:status (status websocket-status-normal-closure)
@@ -402,15 +409,15 @@
       (write-frame (make-websocket-protocol-frame
                     #t 8 (bytes-append (integer->integer-bytes status 2 #f #t)
                                        (string->bytes/utf-8 reason)))
-                   (websocket-connection-out connection)
+                   (websocket-connection--out connection)
                    (websocket-connection-mask? connection))
-      (flush-output (websocket-connection-out connection)))
+      (flush-output (websocket-connection--out connection)))
     (with-handlers ((exn:fail? void))
       (let loop ()
         (unless (eof-object? (websocket-next-frame connection))
           (loop))))
-    (close-input-port (websocket-connection-in connection))
-    (close-output-port (websocket-connection-out connection))))
+    (close-input-port (websocket-connection--in connection))
+    (close-output-port (websocket-connection--out connection))))
 
 (define (make-websocket-dispatcher connection-dispatch (connection-headers #f))
   (lambda (connection req)
@@ -480,12 +487,12 @@
                    (http-response-status res)
                    (http-response-status-text res))))
   (let ((headers (http-response-headers res)))
-    (unless (equal? (http-header-ref headers "upgrade")
-                    "websocket")
+    (unless (string-ci=? (http-header-ref headers "upgrade")
+                         "websocket")
       (error 'websocket-http-hijacker
              "server did not supply expected upgrade header value for websocket protocol"))
-    (unless (equal? (http-header-ref headers "connection")
-                    "upgrade")
+    (unless (string-ci=? (http-header-ref headers "connection")
+                         "upgrade")
       (error 'websocket-http-hijacker
              "server did not supply expected connection header value for websocket protocol"))
     (unless (equal? (string-trim (http-header-ref headers "sec-websocket-accept"))
@@ -516,12 +523,14 @@
 
 ;;
 
-(define (make-websocket-input-port connection #:on-close (on-close websocket-close))
+(define (make-websocket-input-port connection
+                                   #:payload-type (payload-type websocket-payload-text)
+                                   #:on-close (on-close websocket-close))
   (let ((message #f)
         (message-position 0))
     (define (do-read buf)
       (unless message
-        (set! message (websocket-receive connection #:payload-type 'binary))
+        (set! message (websocket-receive connection #:payload-type payload-type))
         (set! message-position 0))
       (if (eof-object? message) eof
           (let ((limit (min (- (bytes-length message) message-position)
@@ -531,17 +540,19 @@
               (set! message-position (+ message-position limit))
               (when (= (bytes-length message) message-position)
                 (set! message #f))))))
-    (make-input-port (object-name (websocket-connection-in connection)) do-read #f
+    (make-input-port (object-name (websocket-connection--in connection)) do-read #f
                      (thunk (on-close connection)))))
 
-(define (make-websocket-output-port connection #:on-close (on-close websocket-close))
+(define (make-websocket-output-port connection
+                                    #:payload-type (payload-type websocket-payload-text)
+                                    #:on-close (on-close websocket-close))
   (define (do-write buf start end)
     (begin0 (- end start)
-      (websocket-send connection (subbytes buf start end)
-                      #:payload-type 'binary)))
-  (make-output-port (object-name (websocket-connection-out connection)) always-evt
+      (websocket-send connection (subbytes buf start end) #:payload-type payload-type)))
+  (make-output-port (object-name (websocket-connection--out connection)) always-evt
                     (lambda (buf start end non-block? breakable?) (do-write buf start end))
-                    (thunk (on-close connection))))
+                    (thunk (on-close connection))
+                    #f #f #f #f void 1 (thunk* 'block)))
 
 ;;
 
