@@ -100,6 +100,7 @@
    ;; NOTE: writing as a single message
    ;; this will help ports like websocket port
    ;; to work correctly (websocket port wrap each write into separate frame)
+   ;; TODO: try to rewrite websocket output port to support buffering and write frame when port flushes
    (json->bytes (make-hasheq `((jsonrpc . ,jsonrpc-version) (id . ,id) ,@payload)))
    port)
   (flush-output port))
@@ -135,26 +136,30 @@
     (write-jsonrpc-message id payload port)))
 
 (define (read-jsonrpc-message (port (current-jsonrpc-input-port)))
-  (let* ((message (read-json port))
-         (message-version (hash-ref message "jsonrpc" #f)))
-    (begin0 message
-      (unless message-version
-        (error (format "jsonrpc version is not specified in incoming message: ~a" message)))
-      (unless (equal? message-version jsonrpc-version)
-        (error (format "jsonrpc version mismatch: expected ~s, got ~s" jsonrpc-version message-version))))))
+  (let* ((message (read-json port)))
+    (if (eof-object? message) eof
+        (begin0 message
+          (let ((message-version (hash-ref message "jsonrpc" #f)))
+            (unless message-version
+              (error (format "jsonrpc version is not specified in incoming message: ~a" message)))
+            (unless (equal? message-version jsonrpc-version)
+              (error (format "jsonrpc version mismatch: expected ~s, got ~s" jsonrpc-version message-version))))))))
 
 (define (read-jsonrpc-request (port (current-jsonrpc-input-port)))
   (let* ((message (read-jsonrpc-message port)))
-    (begin0 message
-      (unless (hash-has-key? message "method")
-        (error (format "jsonrpc method is not specified: ~a" message))))))
+    (if (eof-object? message) eof
+        (begin0 message
+          (unless (hash-has-key? message "method")
+            (error (format "jsonrpc method is not specified: ~a" message)))))))
 
 (define (read-jsonrpc-response (port (current-jsonrpc-input-port)))
   (let* ((message (read-jsonrpc-message port)))
-    (begin0 message
-      (unless (or (hash-has-key? message "result")
-                  (hash-has-key? message "error"))
-        (error (format "jsonrpc message has not result|error field: ~a" message))))))
+    (if (eof-object? message) eof
+        (begin0 message
+          (unless (or (hash-has-key? message "result")
+                      (hash-has-key? message "error"))
+            (unless (hash-has-key? message "method")
+              (error (format "jsonrpc method is not specified: ~a" message))))))))
 
 (module+ test
   (test-case "write-jsonrpc-request"
@@ -262,37 +267,39 @@
     (jsonrpc-apply method-descriptor params)))
 
 (define (dispatch-jsonrpc-response message #:request-registry (registry (current-jsonrpc-request-registry)))
-  (let* ((id (hash-ref message "id"))
-         (chan (call-with-semaphore
-                (jsonrpc-request-registry-sem registry)
-                (thunk (hash-ref (jsonrpc-request-registry-channels registry) id #f))))
-         (default (gensym)))
-    (unless chan
-      (error (format "jsonrpc response dispatch failed, no response channel found for id ~a" id)))
-    (let ((result (hash-ref message "result" default))
-          (err (hash-ref message "error" default)))
-      (cond
-        ((not (eq? result default))
-         (async-channel-put chan result))
-        ((not (eq? err default))
-         (async-channel-put
-          chan
-          (make-exn:fail (string-append
-                          "Remote error: "
-                          (hash-ref err "message")
-                          (let ((data (hash-ref err "data" #f)))
-                            (if data
-                                (format "\nRemote context:\n~a"
-                                        (string-join
-                                         (map (lambda (line) (string-append "  " line))
-                                              data)
-                                         "\n"))
-                                "")))
-                         (current-continuation-marks))))
-        (else (async-channel-put
-               chan
-               (make-exn:fail (format "no result or error present in response: ~a" message)
-                              (current-continuation-marks))))))))
+  (if (hash-ref message "method" #f)
+      ;; NOTE: it is a callback
+      (dispatch-jsonrpc-request message)
+      ;; NOTE: it is a "usual" response
+      (let* ((id (hash-ref message "id"))
+             (chan (call-with-semaphore
+                    (jsonrpc-request-registry-sem registry)
+                    (thunk (hash-ref (jsonrpc-request-registry-channels registry) id #f))))
+             (default (gensym)))
+        (let* ((result (hash-ref message "result" default))
+               (err (hash-ref message "error" default))
+               (resp (cond
+                       ((not (eq? result default)) result)
+                       ((not (eq? err default))
+                        (make-exn:fail (string-append
+                                        "Remote error: "
+                                        (hash-ref err "message")
+                                        (let ((data (hash-ref err "data" #f)))
+                                          (if data
+                                              (format "\nRemote context:\n~a"
+                                                      (string-join
+                                                       (map (lambda (line) (string-append "  " line))
+                                                            data)
+                                                       "\n"))
+                                              "")))
+                                       (current-continuation-marks)))
+                       (else (make-exn:fail (format "no result or error present in response: ~a" message)
+                                            (current-continuation-marks))))))
+          (if chan
+              (async-channel-put chan resp)
+              (if (exn? resp)
+                  (raise resp)
+                  (error (format "jsonrpc response dispatch failed, no response channel found for id ~a, response: ~v" id resp))))))))
 
 (define (invoke-jsonrpc method (port (current-jsonrpc-output-port))
                         #:params (params null)
@@ -349,27 +356,30 @@
 (define (dispatch-jsonrpc-requests (in (current-jsonrpc-input-port))
                                    (out (current-jsonrpc-output-port)))
   (let loop ()
-    (let* ((request (read-jsonrpc-request in))
-           (id (hash-ref request "id"))
-           ;; TODO: bounded worker pool to dispatch requests concurrently
-           (result (with-handlers ((exn? identity))
-                     (dispatch-jsonrpc-request request))))
-      (if (exn? result)
-          (write-jsonrpc-response
-           id out
-           #:error
-           (make-hasheq `((message . ,(exn-message result))
-                          (data . ,(map (lambda (kv)
-                                          (string-append (source-location->string (cdr kv)) " "
-                                                         (format "~a" (car kv))))
-                                        (continuation-mark-set->context (exn-continuation-marks result)))))))
-          (write-jsonrpc-response id out #:result result)))
-    (loop)))
+    (let ((request (read-jsonrpc-request in)))
+      (if (eof-object? request) eof
+          (let ((id (hash-ref request "id"))
+                ;; TODO: bounded worker pool to dispatch requests concurrently
+                (result (with-handlers ((exn? identity))
+                          (dispatch-jsonrpc-request request))))
+            (if (exn? result)
+                (write-jsonrpc-response
+                 id out
+                 #:error
+                 (make-hasheq `((message . ,(exn-message result))
+                                (data . ,(map (lambda (kv)
+                                                (string-append (source-location->string (cdr kv)) " "
+                                                               (format "~a" (car kv))))
+                                              (continuation-mark-set->context (exn-continuation-marks result)))))))
+                (write-jsonrpc-response id out #:result result))
+            (loop))))))
 
 (define (dispatch-jsonrpc-responses (in (current-jsonrpc-input-port)))
   (let loop ()
-    (dispatch-jsonrpc-response (read-jsonrpc-response in))
-    (loop)))
+    (let ((resp (read-jsonrpc-response in)))
+      (if (eof-object? resp) eof
+          (begin (dispatch-jsonrpc-response resp)
+                 (loop))))))
 
 (define (call-jsonrpc method
                       (out (current-jsonrpc-output-port))
