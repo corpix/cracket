@@ -84,7 +84,7 @@
 (define websocket-magic #"258EAFA5-E914-47DA-95CA-C5AB0DC85B11") ;; NOTE: see https://www.rfc-editor.org/rfc/rfc6455
 
 (define current-websocket-stream-buffer-size (make-parameter 65536))
-(define current-websocket-idle-timeout (make-parameter 60))
+(define current-websocket-idle-timeout (make-parameter (* 60 10)))
 (define current-connection-manager (make-parameter (start-connection-manager)))
 
 (define websocket-frame-continuation 0)
@@ -488,12 +488,10 @@
                    (http-response-status res)
                    (http-response-status-text res))))
   (let ((headers (http-response-headers res)))
-    (unless (string-ci=? (http-header-ref headers "upgrade")
-                         "websocket")
+    (unless (string-ci=? (http-header-ref headers "upgrade") "websocket")
       (error 'websocket-http-hijacker
              "server did not supply expected upgrade header value for websocket protocol"))
-    (unless (string-ci=? (http-header-ref headers "connection")
-                         "upgrade")
+    (unless (string-ci=? (http-header-ref headers "connection") "upgrade")
       (error 'websocket-http-hijacker
              "server did not supply expected connection header value for websocket protocol"))
     (unless (equal? (string-trim (http-header-ref headers "sec-websocket-accept"))
@@ -548,8 +546,10 @@
                                     #:payload-type (payload-type websocket-payload-text)
                                     #:on-close (on-close websocket-close))
   (define (do-write buf start end)
-    (begin0 (- end start)
-      (websocket-send connection (subbytes buf start end) #:payload-type payload-type)))
+    (let ((amount (- end start)))
+      (begin0 amount
+        (when (> amount 0) ;; NOTE: if we know when it flushes... why not buffer whole payload and flush per frame?
+          (websocket-send connection (subbytes buf start end) #:payload-type payload-type)))))
   (make-output-port (object-name (websocket-connection--out connection)) always-evt
                     (lambda (buf start end non-block? breakable?) (do-write buf start end))
                     (thunk (on-close connection))
