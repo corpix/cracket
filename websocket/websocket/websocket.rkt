@@ -325,7 +325,7 @@
     (match (read-bytes-avail! buffer in)
       ((? eof-object?)
        (when final-fragment?
-         (write-frame (make-websocket-protocol-frame #t 0 #"") out mask?)))
+         (write-frame (make-websocket-protocol-frame #t websocket-frame-continuation #"") out mask?)))
       (fragment-length
        (write-frame (make-websocket-protocol-frame #f opcode (subbytes buffer 0 fragment-length)) out mask?)
        (loop 0)))))
@@ -364,13 +364,13 @@
         f)
        ((eq? opcode websocket-frame-connection-close)
         (unless (websocket-connection-closed? connection)
-          (write-frame (make-websocket-protocol-frame #t 8 #"")
+          (write-frame (make-websocket-protocol-frame #t websocket-frame-connection-close #"")
                        (websocket-connection--out connection)
                        (websocket-connection-mask? connection))
           (set-websocket-connection-closed?! connection #t))
         eof)
        ((eq? opcode websocket-frame-ping)
-        (write-frame (make-websocket-protocol-frame #t 10 payload)
+        (write-frame (make-websocket-protocol-frame #t websocket-frame-pong payload)
                      (websocket-connection--out connection)
                      (websocket-connection-mask? connection))
         (websocket-next-frame connection))
@@ -407,8 +407,9 @@
     (set-websocket-connection-closed?! connection #t)
     (with-handlers ((exn:fail? void))
       (write-frame (make-websocket-protocol-frame
-                    #t 8 (bytes-append (integer->integer-bytes status 2 #f #t)
-                                       (string->bytes/utf-8 reason)))
+                    #t websocket-frame-connection-close
+                    (bytes-append (integer->integer-bytes status 2 #f #t)
+                                  (string->bytes/utf-8 reason)))
                    (websocket-connection--out connection)
                    (websocket-connection-mask? connection))
       (flush-output (websocket-connection--out connection)))
