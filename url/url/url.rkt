@@ -284,7 +284,7 @@
                (len  (string-length user)))
           (let loop ((n 0))
             (if (= n len)
-                (let ((info (string-split user #\:)))
+                (let ((info (string-split user ":")))
                   (values #t
                           (cons (url-decode (car info) 'user)
                                 (and (pair? (cdr info))
@@ -486,6 +486,9 @@
                             #:path "/test" #:query "foo=bar"))
     (check-equal? (string->url "https://localhost/test?foo=bar&baz=qux")
                   (make-url #:scheme "https" #:host "localhost"
+                            #:path "/test" #:query "foo=bar&baz=qux"))
+    (check-equal? (string->url "https://user:pass@localhost/test?foo=bar&baz=qux")
+                  (make-url #:scheme "https" #:user '("user" . "pass") #:host "localhost"
                             #:path "/test" #:query "foo=bar&baz=qux")))
   (test-case "url->string"
     (check-equal? (url->string (make-url #:scheme "http" #:host "localhost"))
