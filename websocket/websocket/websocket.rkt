@@ -13,7 +13,8 @@
          web-server/http/response-structs
          (prefix-in dispatch-sequencer- web-server/dispatchers/dispatch-sequencer)
          (except-in net/url http-connection?)
-         (only-in corpix/url current-url-scheme-port-dispatcher) ;; FIXME: move to corpix/url everywhere, for now this is for compat reasons
+         (only-in corpix/url current-url-scheme-port-dispatcher)
+         ;; FIXME: move to corpix/url everywhere, for now this is for compat reasons
          (only-in openssl ssl-port? ssl-connect ssl-addresses))
 (provide websocket-protocol-name
          websocket-version
@@ -29,6 +30,8 @@
          websocket-frame-connection-close
          websocket-frame-ping
          websocket-frame-pong
+
+         (struct-out exn:fail:user:websocket:unexpected-opcode)
 
          websocket-payload-text
          websocket-payload-binary
@@ -55,6 +58,9 @@
          (struct-out websocket-connection)
          websocket-connection-in
          websocket-connection-out
+
+         make-websocket-pipe-connection-handler
+
          (struct-out websocket-protocol-frame)
          websocket-service-mapper
 
@@ -93,6 +99,9 @@
 (define websocket-frame-connection-close 8)
 (define websocket-frame-ping 9)
 (define websocket-frame-pong 10)
+
+(define-struct (exn:fail:user:websocket:unexpected-opcode exn:fail:user)
+  (opcode))
 
 (define websocket-payload-text 'text)
 (define websocket-payload-binary 'binary)
@@ -393,9 +402,11 @@
             ((? eof-object?) eof)
             ((websocket-protocol-frame final? opcode payload)
              (unless (equal? opcode expected-opcode)
-               (error 'websocket-receive
-                      "unexpected opcode ~v, expected ~v for ~v payload type"
-                      opcode expected-opcode payload-type))
+               (raise (exn:fail:user:websocket:unexpected-opcode
+                       (format "unexpected opcode ~v, expected ~v for ~v payload type"
+                               opcode expected-opcode payload-type)
+                       (current-continuation-marks)
+                       opcode)))
              (if final?
                  (bytes-append acc payload)
                  (loop (bytes-append acc payload)))))))))
@@ -519,6 +530,29 @@
                                (url-path url) headers
                                (connect in out)
                                in out)))
+
+;;
+
+(define (make-websocket-pipe-connection-handler upstream-hostname upstream-port)
+  (lambda (source state)
+    (parameterize ((current-custodian (make-custodian)))
+      (let*-values (((upstream-in upstream-out) (tcp-connect upstream-hostname upstream-port))
+                    ((read-pump write-pump)
+                     (values (thread (thunk (let loop ()
+                                              (let ((message (websocket-receive source #:payload-type websocket-payload-binary)))
+                                                (unless (eof-object? message)
+                                                  (write-bytes message upstream-out)
+                                                  (flush-output upstream-out)
+                                                  (loop))))))
+                             (thread (thunk (let loop ((buf (make-bytes (* 32 1024)))) ;; FIXME: not sure about this numbers
+                                              (let ((read-result (read-bytes-avail! buf upstream-in)))
+                                                (unless (eof-object? read-result)
+                                                  (websocket-send source (subbytes buf 0 read-result)
+                                                                  #:payload-type websocket-payload-binary)
+                                                  (loop buf)))))))))
+        (sync read-pump write-pump)
+        (websocket-close source)
+        (custodian-shutdown-all (current-custodian))))))
 
 ;;
 
