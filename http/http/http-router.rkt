@@ -1,8 +1,6 @@
 #lang racket
-(require web-server/servlet
-         web-server/http
-         web-server/servlet-dispatch
-         web-server/web-server
+(require web-server/http
+         net/url
          (for-syntax corpix/syntax))
 (provide (all-defined-out))
 
@@ -167,3 +165,11 @@
            (lambda (input) (and (string? input)
                                 (regexp-match rx input)))))
   (apply (lambda (node input) #f)))
+
+(define (http-dispatch-route request)
+  (let ((route (dispatch-route (request-method request)
+                               (url->string (request-uri request)))))
+    (if route
+        ((route-handler route) request)
+        (response/output (lambda (out) (displayln "not found" out))
+                         #:code 404))))
