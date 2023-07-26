@@ -1,5 +1,8 @@
 #lang racket
 (require web-server/servlet
+         web-server/http
+         web-server/servlet-dispatch
+         web-server/web-server
          (for-syntax corpix/syntax))
 
 (define current-routes (make-parameter (make-hash)))
@@ -99,7 +102,7 @@
         body ...)
      (syntax/loc stx
        (let* ((sym-name 'name)
-              (sym-method 'method)
+              (sym-method (string->bytes/utf-8 (string-upcase (symbol->string 'method))))
               (sym-path path))
          (when (eq? (current-route-define-mode) 'strict)
            (let ((route (find-route sym-name)))
@@ -164,16 +167,43 @@
                                 (regexp-match rx input)))))
   (apply (lambda (node input) #f)))
 
-(define-route (/foo request response)
+(define-route (/foo request)
   #:method get
   #:path "/foo"
-  (displayln "handling route"))
+  (response/output (lambda (out)
+                     (displayln "handling route" out))))
 
-(define-route (/foo/bar/baz request response)
+(define-route (/foo/bar/baz request)
   #:method get
   #:path "/foo/bar/baz"
   (displayln "handling route"))
 
-(dispatch-route 'get "/foo") ;; => (route '/foo 'get "/foo" #<procedure:...ttp/http-router.rkt:110:44>)
-(dispatch-route 'get "/foo/bar") ;; => #f
-(dispatch-route 'get "/foo/bar/baz") ;; => (route '/foo/bar/baz 'get "/foo/bar/baz" #<procedure:...ttp/http-router.rkt:110:44>)
+;; (dispatch-route 'get "/foo") ;; => (route '/foo 'get "/foo" #<procedure:...ttp/http-router.rkt:110:44>)
+;; (dispatch-route 'get "/foo/bar") ;; => #f
+;; (dispatch-route 'get "/foo/bar/baz") ;; => (route '/foo/bar/baz 'get "/foo/bar/baz" #<procedure:...ttp/http-router.rkt:110:44>)
+
+;;
+
+(define (dispatch request)
+  (let ((route (dispatch-route (request-method request)
+                               (url->string (request-uri request)))))
+    (print (request-method request))
+    (if route
+        ((route-handler route) request)
+        (response/output (lambda (out) (displayln "not found" out))
+                         #:code 404))))
+
+(define stop
+  (serve
+   #:dispatch (dispatch/servlet dispatch)
+   #:listen-ip "127.0.0.1"
+   #:port 8000))
+
+;; #(struct:request GET #(struct:url #f #f #f #f #t (#(struct:path/param test ())) () #f)
+;;                  (#(struct:header Host 127.0.0.1:8000)
+;;                   #(struct:header User-Agent curl/8.1.2)
+;;                   #(struct:header Accept */*))
+;;                  #<promise:bindings-GET>
+;;                  #f 127.0.0.1 8000 127.0.0.1)
+
+(dispatch-route 'GET "/foo")
