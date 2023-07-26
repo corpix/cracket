@@ -10,8 +10,8 @@
 
 (define-struct route (name method path handler) #:transparent)
 (define-struct route-matcher (name priority match apply) #:transparent)
-(define-struct route-tree (value route matcher (childs #:mutable))
-  #:constructor-name -make-route-tree
+(define-struct route-tree-node (value (route #:mutable) matcher (childs #:mutable))
+  #:constructor-name -make-route-tree-node
   #:transparent)
 
 (define (make-route-tree-node input (route #f))
@@ -26,36 +26,37 @@
               (let* ((matcher (hash-ref matchers matcher-name))
                      (match-proc (route-matcher-match matcher)))
                 (and (match-proc input)
-                     (-make-route-tree input route matcher null))))))
+                     (-make-route-tree-node input route matcher null))))))
         (error (format "no matcher for input ~v" input)))))
 
 (define (make-route-tree route)
-  (let ((separator (current-route-path-separator))
-        (path (route-path route)))
-    (for/fold ((acc #f))
-              ((input (reverse (string-split path separator))))
-      (let ((route-tree (make-route-tree-node input
-                                              ;; route should appear only on leafs
-                                              (if acc #f route))))
-        (begin0 route-tree
-          (when acc
-            (set-route-tree-childs! route-tree (list acc))))))))
+  (let* ((separator (current-route-path-separator))
+         (path (route-path route))
+         (root-node (for/fold ((acc #f))
+                              ((input (reverse (string-split path separator))))
+                      (let ((route-tree-node (make-route-tree-node input (if acc #f route))))
+                        (begin0 route-tree-node
+                          (when acc
+                            (set-route-tree-node-childs! route-tree-node (list acc))))))))
+    (if root-node (list root-node) null)))
 
-(define (route-tree-merge route-trees
+(define (merge-route-tree route-trees
                           #:key (key (lambda (node)
-                                       (cons (route-matcher-name (route-tree-matcher node))
-                                             (route-tree-value node)))))
+                                       (cons (route-matcher-name (route-tree-node-matcher node))
+                                             (route-tree-node-value node)))))
   (for/fold ((acc null))
             ((group (in-list (group-by key route-trees))))
-    (let ((route-tree (car group)))
-      (begin0 (cons route-tree acc)
-        (for ((subject (in-list (cdr group))))
-          (let ((childs (route-tree-merge
-                         (append (route-tree-childs route-tree)
-                                 (route-tree-childs subject))
+    (let ((route-tree-node-acc (struct-copy route-tree-node (car group))))
+      (begin0 (cons route-tree-node-acc acc)
+        (for ((route-tree-node (in-list (cdr group))))
+          (let ((childs (merge-route-tree
+                         (append (route-tree-node-childs route-tree-node-acc)
+                                 (route-tree-node-childs route-tree-node))
                          #:key key)))
-            (set-route-tree-childs! route-tree childs)))))))
-
+            (set-route-tree-node-childs! route-tree-node-acc childs)
+            (let ((route (route-tree-node-route route-tree-node)))
+              (when route
+                (set-route-tree-node-route! route-tree-node-acc route)))))))))
 
 (define (set-route-matcher! name priority handler)
   (let ((matchers (current-route-matchers)))
@@ -86,9 +87,9 @@
          (index (current-routes-index)))
     (hash-set! routes-bucket (route-name route) route)
     (hash-set! routes method routes-bucket)
-    (hash-set! index method (route-tree-merge
+    (hash-set! index method (merge-route-tree
                              (append (hash-ref index method null)
-                                     (list (make-route-tree route)))))))
+                                     (make-route-tree route))))))
 
 (define-syntax (define-route stx)
   (syntax-parse stx
@@ -121,66 +122,58 @@
                                    (make-route-matcher handler-name handler-priority
                                                        match-proc apply-proc)))))))
 
+(define (dispatch-route-tree tree inputs)
+  (let loop ((tree tree)
+             (inputs inputs))
+    (and (pair? inputs)
+         (let ((input (car inputs)))
+           (for/fold ((acc #f))
+                     ((node (in-list tree)))
+             (let ((apply (route-matcher-apply (route-tree-node-matcher node))))
+               (and (apply node input)
+                    (if (pair? (cdr inputs))
+                        (loop (route-tree-node-childs node) (cdr inputs))
+                        (and (route-tree-node-route node) node)))))))))
+
+(define (dispatch-route method path)
+  (let* ((separator (current-route-path-separator))
+         (index (current-routes-index))
+         (index-bucket (hash-ref index method #f))
+         (route-tree-node (and index-bucket (dispatch-route-tree
+                                             index-bucket
+                                             (string-split path separator)))))
+    (and route-tree-node
+         (route-tree-node-route route-tree-node))))
+
 (define-route-matcher static
   #:priority 1
   (match string?)
-  (apply (lambda (segment input) (equal? (route-tree-value segment) input))))
+  (apply (lambda (node input) (equal? (route-tree-node-value node) input))))
 
 (define-route-matcher wildcard
   #:priority 2
   (match (let ((rx (regexp ".*[\\*]+.*")))
            (lambda (input) (and (string? input)
                                 (regexp-match rx input)))))
-  (apply (lambda (segment input) #f)))
+  (apply (lambda (node input) #f)))
 
 (define-route-matcher parameter
   #:priority 3
   (match (let ((rx (regexp ":[a-zA-Z][a-zA-Z0-9]+")))
            (lambda (input) (and (string? input)
                                 (regexp-match rx input)))))
-  (apply (lambda (segment input) #f)))
+  (apply (lambda (node input) #f)))
 
-;; (route-path-segments-merge (list (route->segments "/foo/bar")
-;;                             (route->segments "/foo/baz")
-;;                             (route->segments "/foo/bar/qux*")
-;;                             (route->segments "/foo/bar/bux/:param")))
-
-;; (define (xxx segments inputs)
-;;   (let loop ((segments segments)
-;;              (inputs inputs))
-;;     (and (pair? inputs)
-;;          (let ((input (car inputs)))
-;;            (for/fold ((acc #f))
-;;                      ((segment (in-list segments)))
-;;              (let ((apply (route-path-segment-apply segment)))
-;;                (and (apply segment input)
-;;                     (if (not (pair? (cdr inputs)))
-;;                         (not (pair? (route-tree-childs segment)))
-;;                         ;; hmmm, I need a handler here^
-;;                         ;; but we are working with segment, not a route
-;;                         ;; how do we connect segment and route concepts?
-;;                         (loop (route-tree-childs segment) (cdr inputs))))))))))
-
-;; (displayln (xxx (route-path-segments-merge (list (route->segments "/foo/bar")
-;;                                  (route->segments "/foo/baz")
-;;                                  (route->segments "/foo/bar/qux*")
-;;                                  (route->segments "/foo/bar/bux/:param")))
-;;      (string-split "/foo" (current-route-path-separator))))
-
-(define-route (name request response)
+(define-route (/foo request response)
   #:method get
-  #:path "/name/:parameter1/:parameter2"
+  #:path "/foo"
   (displayln "handling route"))
 
-(define-route (name request response)
+(define-route (/foo/bar/baz request response)
   #:method get
-  #:path "/name/:parameter1/:parameter2"
+  #:path "/foo/bar/baz"
   (displayln "handling route"))
 
-(define-route (name2 request response)
-  #:method get
-  #:path "/name2/:parameter1/:parameter2"
-  (displayln "handling route"))
-
-(current-routes)
-(current-routes-index)
+(dispatch-route 'get "/foo") ;; => (route '/foo 'get "/foo" #<procedure:...ttp/http-router.rkt:110:44>)
+(dispatch-route 'get "/foo/bar") ;; => #f
+(dispatch-route 'get "/foo/bar/baz") ;; => (route '/foo/bar/baz 'get "/foo/bar/baz" #<procedure:...ttp/http-router.rkt:110:44>)
