@@ -36,6 +36,7 @@ in stdenv.mkDerivation rec {
     git findutils gnumake
 
     racket pkg-config
+    websocat
   ];
   shellHook = with pkgs; ''
     export root=$(pwd)
