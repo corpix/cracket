@@ -1,0 +1,65 @@
+#lang racket
+(provide (all-defined-out))
+
+(define  http-status-continue                         100)  ;;  RFC  9110,  15.2.1
+(define  http-status-switching-protocols              101)  ;;  RFC  9110,  15.2.2
+(define  http-status-processing                       102)  ;;  RFC  2518,  10.1
+(define  http-status-early-hints                      103)  ;;  RFC  8297
+(define  http-status-ok                               200)  ;;  RFC  9110,  15.3.1
+(define  http-status-created                          201)  ;;  RFC  9110,  15.3.2
+(define  http-status-accepted                         202)  ;;  RFC  9110,  15.3.3
+(define  http-status-non-authoritative-info           203)  ;;  RFC  9110,  15.3.4
+(define  http-status-no-content                       204)  ;;  RFC  9110,  15.3.5
+(define  http-status-reset-content                    205)  ;;  RFC  9110,  15.3.6
+(define  http-status-partial-content                  206)  ;;  RFC  9110,  15.3.7
+(define  http-status-multi-status                     207)  ;;  RFC  4918,  11.1
+(define  http-status-already-reported                 208)  ;;  RFC  5842,  7.1
+(define  http-status-im-used                          226)  ;;  RFC  3229,  10.4.1
+(define  http-status-multiple-choices                 300)  ;;  RFC  9110,  15.4.1
+(define  http-status-moved-permanently                301)  ;;  RFC  9110,  15.4.2
+(define  http-status-found                            302)  ;;  RFC  9110,  15.4.3
+(define  http-status-see-other                        303)  ;;  RFC  9110,  15.4.4
+(define  http-status-not-modified                     304)  ;;  RFC  9110,  15.4.5
+(define  http-status-use-proxy                        305)  ;;  RFC  9110,  15.4.6
+(define  http-status-temporary-redirect               307)  ;;  RFC  9110,  15.4.8
+(define  http-status-permanent-redirect               308)  ;;  RFC  9110,  15.4.9
+(define  http-status-bad-request                      400)  ;;  RFC  9110,  15.5.1
+(define  http-status-unauthorized                     401)  ;;  RFC  9110,  15.5.2
+(define  http-status-payment-required                 402)  ;;  RFC  9110,  15.5.3
+(define  http-status-forbidden                        403)  ;;  RFC  9110,  15.5.4
+(define  http-status-not-found                        404)  ;;  RFC  9110,  15.5.5
+(define  http-status-method-not-allowed               405)  ;;  RFC  9110,  15.5.6
+(define  http-status-not-acceptable                   406)  ;;  RFC  9110,  15.5.7
+(define  http-status-proxy-auth-required              407)  ;;  RFC  9110,  15.5.8
+(define  http-status-request-timeout                  408)  ;;  RFC  9110,  15.5.9
+(define  http-status-conflict                         409)  ;;  RFC  9110,  15.5.10
+(define  http-status-gone                             410)  ;;  RFC  9110,  15.5.11
+(define  http-status-length-required                  411)  ;;  RFC  9110,  15.5.12
+(define  http-status-precondition-failed              412)  ;;  RFC  9110,  15.5.13
+(define  http-status-request-entity-too-large         413)  ;;  RFC  9110,  15.5.14
+(define  http-status-request-uri-too-long             414)  ;;  RFC  9110,  15.5.15
+(define  http-status-unsupported-media-type           415)  ;;  RFC  9110,  15.5.16
+(define  http-status-requested-range-not-satisfiable  416)  ;;  RFC  9110,  15.5.17
+(define  http-status-expectation-failed               417)  ;;  RFC  9110,  15.5.18
+(define  http-status-teapot                           418)  ;;  RFC  9110,  15.5.19  (Unused)
+(define  http-status-misdirected-request              421)  ;;  RFC  9110,  15.5.20
+(define  http-status-unprocessable-entity             422)  ;;  RFC  9110,  15.5.21
+(define  http-status-locked                           423)  ;;  RFC  4918,  11.3
+(define  http-status-failed-dependency                424)  ;;  RFC  4918,  11.4
+(define  http-status-too-early                        425)  ;;  RFC  8470,  5.2.
+(define  http-status-upgrade-required                 426)  ;;  RFC  9110,  15.5.22
+(define  http-status-precondition-required            428)  ;;  RFC  6585,  3
+(define  http-status-too-many-requests                429)  ;;  RFC  6585,  4
+(define  http-status-request-header-fields-too-large  431)  ;;  RFC  6585,  5
+(define  http-status-unavailable-for-legal-reasons    451)  ;;  RFC  7725,  3
+(define  http-status-internal-server-error            500)  ;;  RFC  9110,  15.6.1
+(define  http-status-not-implemented                  501)  ;;  RFC  9110,  15.6.2
+(define  http-status-bad-gateway                      502)  ;;  RFC  9110,  15.6.3
+(define  http-status-service-unavailable              503)  ;;  RFC  9110,  15.6.4
+(define  http-status-gateway-timeout                  504)  ;;  RFC  9110,  15.6.5
+(define  http-status-http-version-not-supported       505)  ;;  RFC  9110,  15.6.6
+(define  http-status-variant-also-negotiates          506)  ;;  RFC  2295,  8.1
+(define  http-status-insufficient-storage             507)  ;;  RFC  4918,  11.5
+(define  http-status-loop-detected                    508)  ;;  RFC  5842,  7.2
+(define  http-status-not-extended                     510)  ;;  RFC  2774,  7
+(define  http-status-network-authentication-required  511)  ;;  RFC  6585,  6
