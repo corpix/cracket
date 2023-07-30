@@ -166,10 +166,13 @@
                                 (regexp-match rx input)))))
   (apply (lambda (node input) #f)))
 
+(define (http-handle-route route request)
+  ((route-handler route) request))
+
 (define (http-dispatch-route request)
   (let ((route (dispatch-route (request-method request)
                                (url->string (request-uri request)))))
     (if route
-        ((route-handler route) request)
+        (http-handle-route route request)
         (response/output (lambda (out) (displayln "not found" out))
                          #:code 404))))
