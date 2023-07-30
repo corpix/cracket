@@ -1,17 +1,19 @@
 #lang racket
-(require ;; web-server/servlet
-         ;; web-server/http
-         ;; web-server/servlet-dispatch
-         ;; web-server/web-server
+(require web-server/servlet
+         web-server/http
+         web-server/servlet-dispatch
+         web-server/web-server
          gregor
          threading
          racket/os
          racket/generic
          corpix/db
+         corpix/css
          corpix/strings
          corpix/struct
          (for-syntax corpix/syntax)
-         "../http/http/http-router.rkt")
+         "../http/http/http-router.rkt"
+         "../http/http/http-status.rkt")
 
 (define current-db (make-parameter #f))
 (define current-runners (make-parameter (make-hash)))
@@ -40,24 +42,6 @@
          (constructor (hash-ref runner-description 'constructor))
          (executor (hash-ref runner-description 'executor)))
     (executor (apply constructor arguments))))
-
-;; (define-route (/foo request)
-;;   #:method get
-;;   #:path "/foo"
-;;   (response/output (lambda (out)
-;;                      (displayln "handling route" out))))
-
-;; (define-route (/foo/bar/baz request)
-;;   #:method get
-;;   #:path "/foo/bar/baz"
-;;   (response/xexpr '(html (head (title "test"))
-;;                          (body (span "it is working")))))
-
-;; (define stop
-;;   (serve
-;;    #:dispatch (dispatch/servlet http-dispatch-route)
-;;    #:listen-ip "127.0.0.1"
-;;    #:port 8000))
 
 ;;
 
@@ -141,6 +125,10 @@
                 (~> (from task #:as t)
                     (order-by ((t.updated-at) (t.created-at)))))))
 
+(define (task-get id)
+  (lookup (current-db) (~> (from task #:as t)
+                           (where (= t.id ,id)))))
+
 (define (task-instance-create! task)
   (insert-one! (current-db) (task-instance-from-task task)))
 
@@ -150,15 +138,28 @@
 (define (task-instance-run! instance)
   (let ((runner-type (task-instance-runner-type instance))
         (runner-arguments (string->* (task-instance-runner-arguments instance))))
-    (runner-execute runner-type runner-arguments)))
+    (let*-values (((in out) (make-pipe))
+                  ((job) (thread (thunk (for ((line (in-lines in)))
+                                          (task-log-append instance line))))))
+      (parameterize ((current-output-port out))
+        (dynamic-wind
+          void
+          (thunk (runner-execute runner-type runner-arguments))
+          (thunk (close-output-port out)
+                 (sync job)))))))
 
-(define (task-instance-list)
-  (sequence->list
-   (in-entities (current-db)
-                (~> (from task-instance #:as t)
-                    (order-by ((t.updated-at) (t.created-at)))))))
+(define (task-instance-get id)
+  (lookup (current-db)
+          (~> (from task-instance #:as t)
+              (where (= t.id ,id)))))
 
-
+(define (task-instance-list (task-id #f))
+  (let ((query (cond (task-id (~> (from task-instance #:as t)
+                                  (where (= t.task-id ,task-id))
+                                  (order-by ((t.updated-at) (t.created-at)))))
+                     (else (~> (from task-instance #:as t)
+                               (order-by ((t.updated-at) (t.created-at))))))))
+    (sequence->list (in-entities (current-db) query))))
 
 (define (task-log-append instance message)
   (insert-one! (current-db)
@@ -183,10 +184,151 @@
       (task-instance-state-set! instance 'stopped)
       (task-log-append instance "finished"))))
 
-;; (task-list)
-;; (task-instance-list)
-(task-log-list 1)
+;;
 
-(task-run (lookup (current-db)
-                   (~> (from task #:as t)
-                       (where (= t.name ,"test")))))
+(define (xexpr-navigation)
+  `(nav ((class "navigation"))
+        (a ((href "/tasks")) "Tasks")
+        (a ((href "/instances")) "Instances")))
+
+(define (css-page)
+  (css-expr->css (css-expr (body #:margin (40px auto)
+                                 #:max-width 950px
+                                 #:line-height 1.6
+                                 #:font-size 16px
+                                 #:font-family "Fira Code"
+                                 #:color |#444|
+                                 #:padding (0 10px))
+                           (h1 h2 h3 #:line-height 1.2)
+                           (.navigation #:display flex
+                                        #:align-items center
+                                        #:justify-content center)
+                           ((.navigation a:before) (.navigation a:after)
+                                                   #:content ""
+                                                   #:position absolute
+                                                   #:transition |transform .5s ease|)
+                           ((.navigation a:before) #:left 0
+                                                   #:bottom 0
+                                                   #:width 100%
+                                                   #:height 2px
+                                                   #:background |#000|
+                                                   #:transform |scaleX(0)|)
+                           ((.navigation a:hover:before) #:transform |scaleX(1)|)
+                           ((.navigation a) #:width auto
+                                            #:height 50px
+                                            #:position relative
+                                            #:text-decoration none
+                                            #:line-height 35px
+                                            #:background-color transparent
+                                            #:color |#000|
+                                            #:padding (10px 0 0 0)
+                                            #:margin (0 10px)
+                                            #:font-size 18px
+                                            #:font-weight bold
+                                            #:text-align center
+                                            #:text-transform uppercase
+                                            #:box-sizing border-box)
+                           (.content #:padding-top 15px))))
+
+(define (xexpr-page body #:title (title ""))
+  `(html (head (title ,title)
+               (style ,(css-page)))
+         (body (div ((class "root"))
+                    (div ((class "container"))
+                         (div ((class="header"))
+                              ,(xexpr-navigation))
+                         (div ((class "content"))
+                              ,body))))))
+
+(define (xexpr-instances (task-id #f))
+  `(div (ul ,@(for/list ((instance (in-list (task-instance-list task-id))))
+                `(li (a ((href ,(format "/instances/~a" (task-instance-id instance))))
+                        ,(task-instance-name instance)))))))
+
+;;
+
+(define-route (/ request)
+  #:method get
+  (response/xexpr (xexpr-page "")))
+
+(define-route (/tasks request)
+  #:method get
+  (response/xexpr
+   (xexpr-page
+    `(div (ul ,@(for/list ((task (in-list (task-list))))
+                  `(li (a ((href ,(format "/instances/~a" (task-id task))))
+                          ,(task-name task))))))
+    #:title "tasks")))
+
+(define-route (/tasks/:task-id request)
+  #:method get
+  (let ((task (task-get (http-route-parameter ':task-id))))
+    (response/xexpr
+     #:code (if task http-status-ok http-status-not-found)
+     (xexpr-page
+      (if task
+          `(div (table (tr (td "name") (td (a ((href ,(format "/tasks/~a" (task-id task))))
+                                              ,(task-name task))))
+                       (tr (td "runner") (td ,(format "~a" (task-runner-type task))))
+                       (tr (td "runner-arguments") (td ,(format "~a" (task-runner-arguments task))))
+                       (tr (td "created-at") (td ,(datetime->iso8601 (task-created-at task))))
+                       ,@(let ((updated-at (task-updated-at task)))
+                           (if (sql-null? updated-at) null
+                               `(tr (td "updated-at")
+                                    (td ,(datetime->iso8601 updated-at))))))
+
+                (h4 "runner:")
+                (div ,(format "~a" (task-runner-arguments task)))
+
+                (h4 "instances:")
+                ,(xexpr-instances))
+          "task was not found")
+      #:title "task"))))
+
+(define-route (/instances request)
+  #:method get
+  (response/xexpr
+   (xexpr-page (xexpr-instances) #:title "instances")))
+
+(define-route (/instances/:instance-id request)
+  #:method get
+  (let* ((instance-id (http-route-parameter ':instance-id))
+         (instance (task-instance-get instance-id)))
+    (response/xexpr
+     #:code (if instance http-status-ok http-status-not-found)
+     (xexpr-page
+      (if instance
+          (let ((logs (task-log-list instance-id)))
+            `(div (table (tr (td "name") (td (a ((href ,(format "/tasks/~a" (task-instance-task-id instance))))
+                                                ,(task-instance-name instance))))
+                         (tr (td "state") (td ,(format "~a" (task-instance-state instance))))
+                         (tr (td "runner") (td ,(format "~a" (task-instance-runner-type instance))))
+                         (tr (td "host") (td ,(task-instance-host instance)))
+                         (tr (td "created-at") (td ,(datetime->iso8601 (task-instance-created-at instance))))
+                         ,@(let ((updated-at (task-instance-updated-at instance)))
+                             (if (sql-null? updated-at) null
+                                 `(tr (td "updated-at")
+                                      (td ,(datetime->iso8601 updated-at))))))
+                  (h4 "runner:")
+                  (div ,(format "~a" (task-instance-runner-arguments instance)))
+                  (h4 "logs:")
+                  (div ,@(for/fold ((acc null))
+                                  ((line (in-list logs)))
+
+                           (append acc
+                                   `((code ,(format "~a | ~a"
+                                                    (datetime->iso8601 (task-log-timestamp line))
+                                                    (task-log-message line)))
+                                     (br)))))))
+          "instance was not found")
+      #:title "instance"))))
+
+(define stop
+  (serve
+   #:dispatch (dispatch/servlet http-dispatch-route)
+   #:listen-ip "127.0.0.1"
+   #:port 8000))
+
+;;
+
+(task-run (task-get 1))
