@@ -9,6 +9,7 @@
 (define current-route-path-separator (make-parameter "/"))
 (define current-route-define-mode (make-parameter 'loose)) ;; or 'strict
 (define current-route-matchers (make-parameter (make-hash)))
+(define current-route-context (make-parameter #f))
 
 (define-struct route (name method path handler) #:transparent)
 (define-struct route-matcher (name priority match apply) #:transparent)
@@ -26,8 +27,8 @@
                       ((matcher-name (sort (hash-keys matchers) symbol<?)))
               #:break result
               (let* ((matcher (hash-ref matchers matcher-name))
-                     (match-proc (route-matcher-match matcher)))
-                (and (match-proc input)
+                     (match (route-matcher-match matcher)))
+                (and (match matcher input)
                      (-make-route-tree-node input route matcher null))))))
         (error (format "no matcher for input ~v" input)))))
 
@@ -112,16 +113,20 @@
 
 (define-syntax (define-route-matcher stx)
   (syntax-parse stx
-    #:datum-literals (match apply)
+    #:datum-literals (define)
     ((_ name
         (~optional (~seq #:priority prio) #:defaults ((prio #'1)))
-        (match match-proc)
-        (apply apply-proc))
-     (syntax (let ((handler-name 'name)
-                   (handler-priority prio))
-               (set-route-matcher! handler-name handler-priority
-                                   (make-route-matcher handler-name handler-priority
-                                                       match-proc apply-proc)))))))
+        #:match match-proc
+        #:apply apply-proc
+        (define (method arguments ...) body ...) ...)
+     (syntax (begin
+               (define (method arguments ...) body ...) ...
+               (let ((name-sym 'name)
+                     (prio-sym prio))
+                 (set-route-matcher!
+                  name-sym prio-sym
+                  (make-route-matcher name-sym prio-sym
+                                      match-proc apply-proc))))))))
 
 (define (dispatch-route-tree tree inputs)
   (let loop ((tree tree)
@@ -131,8 +136,9 @@
            (for/fold ((acc #f))
                      ((node (in-list tree)))
              #:break acc
-             (let ((apply (route-matcher-apply (route-tree-node-matcher node))))
-               (and (apply node input)
+             (let* ((matcher (route-tree-node-matcher node))
+                    (apply (route-matcher-apply matcher)))
+               (and (apply matcher node input)
                     (if (pair? (cdr inputs))
                         (loop (route-tree-node-childs node) (cdr inputs))
                         (and (route-tree-node-route node) node)))))))))
@@ -141,38 +147,54 @@
   (let* ((separator (current-route-path-separator))
          (index (current-routes-index))
          (index-bucket (hash-ref index method #f))
-         (route-tree-node (and index-bucket (dispatch-route-tree
-                                             index-bucket
-                                             (string-split path separator #:trim? #f)))))
+         (route-tree-node (and index-bucket
+                               (dispatch-route-tree
+                                index-bucket
+                                (string-split path separator #:trim? #f)))))
     (and route-tree-node
          (route-tree-node-route route-tree-node))))
 
 (define-route-matcher static
   #:priority 1
-  (match string?)
-  (apply (lambda (node input) (equal? (route-tree-node-value node) input))))
+  #:match (lambda (matcher input) (string? input))
+  #:apply (lambda (matcher node input)
+            (equal? (route-tree-node-value node) input)))
 
 (define-route-matcher wildcard
   #:priority 2
-  (match (let ((rx (regexp ".*[\\*]+.*")))
-           (lambda (input) (and (string? input)
-                                (regexp-match rx input)))))
-  (apply (lambda (node input) #f)))
+  #:match (let ((rx (regexp ".*[\\*]+.*")))
+            (lambda (matcher input)
+              (and (string? input)
+                   (regexp-match rx input))))
+  #:apply (lambda (matcher node input) #t))
 
 (define-route-matcher parameter
   #:priority 3
-  (match (let ((rx (regexp ":[a-zA-Z][a-zA-Z0-9]+")))
-           (lambda (input) (and (string? input)
-                                (regexp-match rx input)))))
-  (apply (lambda (node input) #f)))
+  #:match (let ((rx (regexp ":[a-zA-Z][a-zA-Z0-9]+")))
+            (lambda (matcher input)
+              (and (string? input)
+                   (regexp-match rx input))))
+  #:apply (lambda (matcher node input)
+            (let* ((ctx (current-route-context))
+                   (key (route-matcher-name matcher))
+                   (bucket (or (hash-ref ctx key #f)
+                               (make-hash))))
+              (hash-set! bucket (string->symbol (route-tree-node-value node)) input)
+              (hash-set! ctx key bucket)))
+  (define (http-route-parameter parameter (default #f))
+    (let ((bucket (hash-ref (current-route-context) 'parameter #f)))
+      (if bucket
+          (hash-ref bucket parameter default)
+          default))))
 
 (define (http-handle-route route request)
   ((route-handler route) request))
 
 (define (http-dispatch-route request)
-  (let ((route (dispatch-route (request-method request)
-                               (url->string (request-uri request)))))
-    (if route
-        (http-handle-route route request)
-        (response/output (lambda (out) (displayln "not found" out))
-                         #:code 404))))
+  (parameterize ((current-route-context (make-hash)))
+    (let ((route (dispatch-route (request-method request)
+                                 (url->string (request-uri request)))))
+      (if route
+          (http-handle-route route request)
+          (response/output (lambda (out) (displayln "not found" out))
+                           #:code 404)))))
