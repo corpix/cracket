@@ -25,7 +25,8 @@
     UInt8 UInt16 UInt32 UInt64 UInt128 UInt256
     Int8 Int16 Int32 Int64 Int128 Int256
     Float32 Float64
-    Date DateTime DateTime64))
+    Date DateTime DateTime64
+    Boolean Bool))
 
 (define-clickhouse-syntax-set clickhouse-complex-type
   '(FixedString Array Tuple Enum8 Enum16 Nested Nullable Decimal))
