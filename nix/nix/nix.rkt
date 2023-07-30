@@ -175,61 +175,20 @@
 
 ;;
 
-(define-struct nix-with
-  (sym body)
-  #:prefab)
-
-(define-struct nix-let
-  (bindings body)
-  #:prefab)
-
-(define-struct nix-inherit
-  (from syms)
-  #:prefab)
-
-(define-struct nix-rec
-  (expr)
-  #:prefab)
-
-(define-struct nix-binding
-  (identifier expr)
-  #:prefab)
-
-(define-struct nix-function
-  (arguments body)
-  #:prefab)
-
-(define-struct nix-function-pattern-match
-  (patterns)
-  #:prefab)
-
-(define-struct nix-function-call
-  (name arguments)
-  #:prefab)
-
-(define-struct nix-import
-  (expr)
-  #:prefab)
-
-(define-struct nix-interpolation
-  (expr)
-  #:prefab)
-
-(define-struct nix-dot
-  (parts)
-  #:prefab)
-
-(define-struct nix-path
-  (parts)
-  #:prefab)
-
-(define-struct nix-literal
-  (expr)
-  #:prefab)
-
-(define-struct nix-string
-  (expr)
-  #:prefab)
+(define-struct nix-with (sym body) #:prefab)
+(define-struct nix-let (bindings body) #:prefab)
+(define-struct nix-inherit (from syms) #:prefab)
+(define-struct nix-rec (expr) #:prefab)
+(define-struct nix-binding (identifier expr) #:prefab)
+(define-struct nix-function (arguments body) #:prefab)
+(define-struct nix-function-pattern-match (patterns) #:prefab)
+(define-struct nix-function-call (name arguments) #:prefab)
+(define-struct nix-import (expr) #:prefab)
+(define-struct nix-interpolation (expr) #:prefab)
+(define-struct nix-dot (parts) #:prefab)
+(define-struct nix-path (parts) #:prefab)
+(define-struct nix-literal (expr) #:prefab)
+(define-struct nix-string (expr) #:prefab)
 
 (define (nix-generate value
                       #:level (level 0)
@@ -462,8 +421,8 @@
 ;; ;; (create-dirs-catalog "/home/user/projects/src/git.backbone/corpix/cracket/.catalog"
 ;; ;;                      '("/home/user/projects/src/git.backbone/corpix/cracket"))
 
-;; (current-packages (catalogs->packages (cons "file:///home/user/projects/src/git.backbone/corpix/cracket/.catalog"
-;;                                             (current-package-catalog-urls))))
+(current-packages (catalogs->packages (cons "file:///home/user/projects/src/git.backbone/corpix/cracket/.catalog"
+                                            (current-package-catalog-urls))))
 
-;; (define test-package (hash-ref (current-packages) "corpix-http"))
-;; (displayln (nix-generate (package->nix test-package)))
+(define test-package (hash-ref (current-packages) "corpix-firewalld"))
+(displayln (nix-generate (package->nix test-package)))
