@@ -35,7 +35,7 @@
   (let* ((separator (current-route-path-separator))
          (path (route-path route))
          (root-node (for/fold ((acc #f))
-                              ((input (reverse (string-split path separator))))
+                              ((input (reverse (string-split path separator #:trim? #f))))
                       (let ((route-tree-node (make-route-tree-node input (if acc #f route))))
                         (begin0 route-tree-node
                           (when acc
@@ -89,27 +89,26 @@
          (index (current-routes-index)))
     (hash-set! routes-bucket (route-name route) route)
     (hash-set! routes method routes-bucket)
-    (hash-set! index method (merge-route-tree
-                             (append (hash-ref index method null)
-                                     (make-route-tree route))))))
+    (hash-set! index method (merge-route-tree (append (hash-ref index method null)
+                                                      (make-route-tree route))))))
 
 (define-syntax (define-route stx)
   (syntax-parse stx
     ((_ (name argument ...)
         #:method method
-        #:path path
+        (~optional (~seq #:path path) #:defaults ((path #'(symbol->string 'name))))
         body ...)
      (syntax/loc stx
-       (let* ((sym-name 'name)
-              (sym-method (string->bytes/utf-8 (string-upcase (symbol->string 'method))))
-              (sym-path path))
+       (let* ((name-sym 'name)
+              (method-sym (string->bytes/utf-8 (string-upcase (symbol->string 'method))))
+              (path-sym path))
          (when (eq? (current-route-define-mode) 'strict)
-           (let ((route (find-route sym-name)))
+           (let ((route (find-route name-sym)))
              (when route
                (error (format "route with name ~v already defined for method ~v with path ~v"
-                              sym-name (route-method route) (route-path route))))))
-         (set-route! sym-method (make-route sym-name sym-method sym-path
-                                            (lambda (argument ...) body ...))))))))
+                              name-sym (route-method route) (route-path route))))))
+         (void (set-route! method-sym (make-route name-sym method-sym path-sym
+                                                  (lambda (argument ...) body ...)))))))))
 
 (define-syntax (define-route-matcher stx)
   (syntax-parse stx
@@ -131,6 +130,7 @@
          (let ((input (car inputs)))
            (for/fold ((acc #f))
                      ((node (in-list tree)))
+             #:break acc
              (let ((apply (route-matcher-apply (route-tree-node-matcher node))))
                (and (apply node input)
                     (if (pair? (cdr inputs))
@@ -143,7 +143,7 @@
          (index-bucket (hash-ref index method #f))
          (route-tree-node (and index-bucket (dispatch-route-tree
                                              index-bucket
-                                             (string-split path separator)))))
+                                             (string-split path separator #:trim? #f)))))
     (and route-tree-node
          (route-tree-node-route route-tree-node))))
 
