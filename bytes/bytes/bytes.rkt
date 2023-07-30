@@ -1,6 +1,8 @@
 #lang racket
+(require racket/bytes)
 (provide bytes-index
-         bytes-contains-any)
+         bytes-contains-any
+         (all-from-out racket/bytes))
 
 (define (bytes-index vec octet (start 0) (end (bytes-length vec)))
   (let loop ((index start))
