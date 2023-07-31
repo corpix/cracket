@@ -92,7 +92,9 @@
             (make-task #:name "test"
                        #:description "sample test task"
                        #:runner-type (symbol->string 'runner-eval)
-                       #:runner-arguments (*->string '(displayln "hello world"))
+                       #:runner-arguments (*->string '(if (> (/ (random 2) 2) 0)
+                                                          (displayln "hello world")
+                                                          (error "oops")))
                        #:created-at (now))))
 
  ;; reset any current host task states to "error" before starting
@@ -178,7 +180,7 @@
   (let* ((instance (task-instance-create! task)))
     (task-log-append instance "starting")
     (with-handlers ((exn? (lambda (exn)
-                            (task-log-append (task-instance-id instance) (exn-message exn))
+                            (task-log-append instance (exn-message exn))
                             (task-instance-state-set! instance 'error))))
       (task-instance-run! instance)
       (task-instance-state-set! instance 'stopped)
@@ -228,7 +230,57 @@
                                             #:text-align center
                                             #:text-transform uppercase
                                             #:box-sizing border-box)
-                           (.content #:padding-top 15px))))
+                           (.content #:padding-top 15px)
+
+                           (a.instance
+                            #:position relative
+                            #:padding-right 10px
+                            #:text-decoration none)
+
+                           (a.instance.state-pending::after
+                            #:content ""
+                            #:position absolute
+                            #:top 50%
+                            #:right 0
+                            #:transform |translateY(-50%)|
+                            #:width 0
+                            #:height 0
+                            #:border-style solid
+                            #:border-width (6px 0 6px 6px)
+                            #:border-color |transparent transparent transparent grey|)
+                           (a.instance.state-stopped::after
+                            #:content ""
+                            #:position absolute
+                            #:top 50%
+                            #:right 0
+                            #:transform |translateY(-50%)|
+                            #:width 0
+                            #:height 0
+                            #:border-style solid
+                            #:border-width (6px 0 6px 6px)
+                            #:border-color |transparent transparent transparent green|)
+                           (a.instance.state-started::after
+                            #:content ""
+                            #:position absolute
+                            #:top 50%
+                            #:right 0
+                            #:transform |translateY(-50%)|
+                            #:width 0
+                            #:height 0
+                            #:border-style solid
+                            #:border-width (6px 0 6px 6px)
+                            #:border-color |transparent transparent transparent yellow|)
+                           (a.instance.state-error::after
+                            #:content ""
+                            #:position absolute
+                            #:top 50%
+                            #:right 0
+                            #:transform |translateY(-50%)|
+                            #:width 0
+                            #:height 0
+                            #:border-style solid
+                            #:border-width (6px 0 6px 6px)
+                            #:border-color |transparent transparent transparent red|))))
 
 (define (xexpr-page body #:title (title ""))
   `(html (head (title ,title)
@@ -242,7 +294,8 @@
 
 (define (xexpr-instances (task-id #f))
   `(div (ul ,@(for/list ((instance (in-list (task-instance-list task-id))))
-                `(li (a ((href ,(format "/instances/~a" (task-instance-id instance))))
+                `(li (a ((href ,(format "/instances/~a" (task-instance-id instance)))
+                         (class ,(format "instance state-~a" (task-instance-state instance))))
                         ,(task-instance-name instance)))))))
 
 ;;
