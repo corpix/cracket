@@ -168,6 +168,22 @@
                                           (close-input-port out)
                                           (close-input-port err)))))
                        #:capabilities '((tcp . 8089))
+                       #:created-at (now)))
+   (insert! (current-db)
+            (make-task #:name "test-always-fails"
+                       #:description "sample failing test task"
+                       #:runner-type (symbol->string 'runner-eval)
+                       #:runner-script
+                       '(begin (error "oops"))
+                       #:capabilities '()
+                       #:created-at (now)))
+   (insert! (current-db)
+            (make-task #:name "test-long-task"
+                       #:description "sample test task which takes time to execute"
+                       #:runner-type (symbol->string 'runner-eval)
+                       #:runner-script
+                       '(begin (sleep 99999999))
+                       #:capabilities '()
                        #:created-at (now))))
 
  ;; reset any current host task states to "error" before starting
