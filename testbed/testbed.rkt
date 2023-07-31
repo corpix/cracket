@@ -7,6 +7,7 @@
          threading
          racket/os
          racket/generic
+         racket/pretty
          corpix/db
          corpix/css
          corpix/strings
@@ -18,6 +19,32 @@
 (define current-db (make-parameter #f))
 (define current-runners (make-parameter (make-hash)))
 (define task-states '(pending stopped started error))
+
+;;
+
+(define-struct runner-job (instance thunk) #:transparent)
+(define-struct runner-jobs (semaphore store (counter #:mutable)) #:transparent)
+
+(define current-runner-jobs (make-parameter
+                             (make-runner-jobs (make-semaphore 1)
+                                               (make-hash)
+                                               0)))
+
+(define (runner-jobs-remove! id #:jobs (jobs (current-runner-jobs)))
+  (call-with-semaphore
+   (runner-jobs-semaphore jobs)
+   (thunk (hash-remove! (runner-jobs-store jobs) id))))
+
+(define (runner-jobs-add! job #:jobs (jobs (current-runner-jobs)))
+  (call-with-semaphore
+   (runner-jobs-semaphore jobs)
+   (thunk (let* ((id (+ 1 (runner-jobs-counter jobs)))
+                 (reconcile (thunk (runner-jobs-remove! id #:jobs jobs))))
+            (hash-set! (runner-jobs-store jobs) id
+                       (thread (thunk (dynamic-wind void (runner-job-thunk job) reconcile))))
+            (set-runner-jobs-counter! jobs id)))))
+
+;;
 
 (define-syntax (define-runner stx)
   (syntax-parse stx
@@ -34,23 +61,39 @@
 
 (define-runner runner-eval (code)
   #:executor (lambda (runner)
-               (void (eval (runner-eval-code runner)))))
+               (let ((custodian (make-custodian)))
+                 (parameterize ((current-custodian custodian)
+                                (current-subprocess-custodian-mode 'kill))
+                   (void (dynamic-wind
+                           void
+                           (thunk (eval (runner-eval-code runner)))
+                           (thunk (custodian-shutdown-all custodian))))))))
 
-(define (runner-execute type . arguments)
+(define (runner-execute type . script)
   (let* ((runner-description (or (hash-ref (current-runners) type #f)
                                  (error (format "runner ~v is not defined" type))))
          (constructor (hash-ref runner-description 'constructor))
          (executor (hash-ref runner-description 'executor)))
-    (executor (apply constructor arguments))))
+    (executor (apply constructor script))))
 
 ;;
+
+(define-type sexpr
+  #:declaration
+  (lambda (type dialect)
+    (case dialect
+      ((sqlite3) "TEXT")
+      ((postgresql) "TEXT")))
+  #:load (lambda (_ __ value) (string->* value))
+  #:dump (lambda (_ __ value) (*->string value)))
 
 (define-schema task
   ((id id/f #:primary-key #:auto-increment)
    (name string/f #:contract non-empty-string? #:unique)
    (description string/f)
    (runner-type string/f)
-   (runner-arguments string/f)
+   (runner-script sexpr/f)
+   (capabilities sexpr/f)
    (created-at datetime/f)
    (updated-at datetime/f #:nullable)))
 
@@ -61,7 +104,8 @@
    (task-id id/f #:foreign-key (task id))
    (state (enum/f task-states))
    (runner-type string/f)
-   (runner-arguments string/f)
+   (runner-script sexpr/f)
+   (capabilities sexpr/f)
    (host string/f)
    (created-at datetime/f)
    (updated-at datetime/f #:nullable)))
@@ -92,9 +136,38 @@
             (make-task #:name "test"
                        #:description "sample test task"
                        #:runner-type (symbol->string 'runner-eval)
-                       #:runner-arguments (*->string '(if (> (/ (random 2) 2) 0)
-                                                          (displayln "hello world")
-                                                          (error "oops")))
+                       #:runner-script
+                       '(begin (require racket/system
+                                        racket/match
+                                        racket/string
+                                        racket/function)
+                               (match-let* ((executable (find-executable-path "nc"))
+                                            ((list out in pid err control)
+                                             (process* executable "-l" "8089"))
+                                            (io (for/list ((port (list out err)))
+                                                  (thread (thunk
+                                                           (for ((line (in-lines port)))
+                                                             (displayln line)))))))
+                                 (control 'wait)
+                                 (dynamic-wind
+                                   void
+                                   (thunk (let ((code (control 'exit-code)))
+                                            (when (not (= code 0))
+                                              (raise (let ((line (string-join (append (list interpreter) arguments) " "))
+                                                           (stderr (or (port-closed? err)
+                                                                       (string-trim (port->string err) "\n"
+                                                                                    #:left? #t
+                                                                                    #:right? #t))))
+                                                       (make-exn:fail:user:task:command
+                                                        (format "shell command '~s' exited with code ~a~a"
+                                                                line code (if stderr (format ", err: ~a" stderr) ""))
+                                                        (current-continuation-marks)
+                                                        line code stderr))))))
+                                   (thunk (for ((port (in-list io)))
+                                            (sync port))
+                                          (close-input-port out)
+                                          (close-input-port err)))))
+                       #:capabilities '((tcp . 8089))
                        #:created-at (now))))
 
  ;; reset any current host task states to "error" before starting
@@ -117,7 +190,8 @@
                       #:task-id (task-id task)
                       #:state state
                       #:runner-type (task-runner-type task)
-                      #:runner-arguments (task-runner-arguments task)
+                      #:runner-script (task-runner-script task)
+                      #:capabilities (task-capabilities task)
                       #:host (gethostname)
                       #:created-at (now)))
 
@@ -135,20 +209,31 @@
   (insert-one! (current-db) (task-instance-from-task task)))
 
 (define (task-instance-state-set! instance state)
-  (update-one! (current-db) (update-task-instance-state instance (thunk* state))))
+  (update-one! (current-db) (~> instance
+                                (update-task-instance-state _ (thunk* state))
+                                (update-task-instance-updated-at _ (thunk* (now))))))
 
 (define (task-instance-run! instance)
-  (let ((runner-type (task-instance-runner-type instance))
-        (runner-arguments (string->* (task-instance-runner-arguments instance))))
-    (let*-values (((in out) (make-pipe))
-                  ((job) (thread (thunk (for ((line (in-lines in)))
-                                          (task-log-append instance line))))))
-      (parameterize ((current-output-port out))
-        (dynamic-wind
-          void
-          (thunk (runner-execute runner-type runner-arguments))
-          (thunk (close-output-port out)
-                 (sync job)))))))
+  (task-log-append instance "starting")
+  (let* ((runner-type (task-instance-runner-type instance))
+         (runner-script (task-instance-runner-script instance)))
+    (runner-jobs-add!
+     (make-runner-job instance
+                      (thunk
+                       (with-handlers ((exn? (lambda (exn)
+                                               (task-log-append instance (exn-message exn))
+                                               (task-instance-state-set! instance 'error))))
+                         (let*-values (((in out) (make-pipe))
+                                       ((job) (thread (thunk (for ((line (in-lines in)))
+                                                               (task-log-append instance line))))))
+                           (parameterize ((current-output-port out))
+                             (dynamic-wind
+                               void
+                               (thunk (runner-execute runner-type runner-script))
+                               (thunk (close-output-port out)
+                                      (sync job))))
+                           (task-instance-state-set! instance 'stopped)
+                           (task-log-append instance "finished"))))))))
 
 (define (task-instance-get id)
   (lookup (current-db)
@@ -160,7 +245,7 @@
                                   (where (= t.task-id ,task-id))
                                   (order-by ((t.updated-at) (t.created-at)))))
                      (else (~> (from task-instance #:as t)
-                               (order-by ((t.updated-at) (t.created-at))))))))
+                               (order-by ((t.updated-at #:desc) (t.created-at #:desc))))))))
     (sequence->list (in-entities (current-db) query))))
 
 (define (task-log-append instance message)
@@ -178,13 +263,7 @@
 
 (define (task-run task)
   (let* ((instance (task-instance-create! task)))
-    (task-log-append instance "starting")
-    (with-handlers ((exn? (lambda (exn)
-                            (task-log-append instance (exn-message exn))
-                            (task-instance-state-set! instance 'error))))
-      (task-instance-run! instance)
-      (task-instance-state-set! instance 'stopped)
-      (task-log-append instance "finished"))))
+    (task-instance-run! instance)))
 
 ;;
 
@@ -202,6 +281,7 @@
                                  #:color |#444|
                                  #:padding (0 10px))
                            (h1 h2 h3 #:line-height 1.2)
+                           (ul #:list-style none)
                            (.navigation #:display flex
                                         #:align-items center
                                         #:justify-content center)
@@ -309,9 +389,16 @@
   (response/xexpr
    (xexpr-page
     `(div (ul ,@(for/list ((task (in-list (task-list))))
-                  `(li (a ((href ,(format "/instances/~a" (task-id task))))
+                  `(li (a ((href ,(format "/tasks/~a" (task-id task))))
                           ,(task-name task))))))
     #:title "tasks")))
+
+(define-route (/tasks/:task-id/run request)
+  #:method post
+  (let ((id (http-route-parameter ':task-id)))
+    (if (task-run (task-get id))
+        (redirect-to (format "/tasks/~a" id))
+        (response/xexpr "task was not found" #:code http-status-not-found))))
 
 (define-route (/tasks/:task-id request)
   #:method get
@@ -323,18 +410,21 @@
           `(div (table (tr (td "name") (td (a ((href ,(format "/tasks/~a" (task-id task))))
                                               ,(task-name task))))
                        (tr (td "runner") (td ,(format "~a" (task-runner-type task))))
-                       (tr (td "runner-arguments") (td ,(format "~a" (task-runner-arguments task))))
                        (tr (td "created-at") (td ,(datetime->iso8601 (task-created-at task))))
                        ,@(let ((updated-at (task-updated-at task)))
                            (if (sql-null? updated-at) null
                                `(tr (td "updated-at")
                                     (td ,(datetime->iso8601 updated-at))))))
 
-                (h4 "runner:")
-                (div ,(format "~a" (task-runner-arguments task)))
+                (form ((method "post")
+                       (action ,(format "/tasks/~a/run" (task-id task))))
+                      (button ((type "submit")) "instantiate"))
 
-                (h4 "instances:")
-                ,(xexpr-instances))
+                (ul (li (details
+                         (summary (b "runner"))
+                         (div (pre ,(pretty-format (task-runner-script task))))))
+
+                    (li (details (summary (b "instances")) ,(xexpr-instances)))))
           "task was not found")
       #:title "task"))))
 
@@ -362,17 +452,20 @@
                              (if (sql-null? updated-at) null
                                  `(tr (td "updated-at")
                                       (td ,(datetime->iso8601 updated-at))))))
-                  (h4 "runner:")
-                  (div ,(format "~a" (task-instance-runner-arguments instance)))
-                  (h4 "logs:")
-                  (div ,@(for/fold ((acc null))
-                                  ((line (in-list logs)))
+                  (ul (li (details
+                           (summary (b "runner"))
+                           (div (pre ,(pretty-format (task-instance-runner-script instance))))))
 
-                           (append acc
-                                   `((code ,(format "~a | ~a"
-                                                    (datetime->iso8601 (task-log-timestamp line))
-                                                    (task-log-message line)))
-                                     (br)))))))
+                      (li (details
+                           (summary (b "logs"))
+                           (div ,@(for/fold ((acc null))
+                                            ((line (in-list logs)))
+
+                                    (append acc
+                                            `((code ,(format "~a | ~a"
+                                                             (datetime->iso8601 (task-log-timestamp line))
+                                                             (task-log-message line)))
+                                              (br))))))))))
           "instance was not found")
       #:title "instance"))))
 
@@ -381,7 +474,3 @@
    #:dispatch (dispatch/servlet http-dispatch-route)
    #:listen-ip "127.0.0.1"
    #:port 8000))
-
-;;
-
-(task-run (task-get 1))
