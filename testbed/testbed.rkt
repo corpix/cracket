@@ -119,10 +119,10 @@
 ;;
 
 (when (file-exists? "testbed.db")
-    (delete-file "testbed.db"))
+  (delete-file "testbed.db"))
 (current-db (sqlite3-connect
-            #:database "testbed.db"
-            #:mode 'create))
+             #:database "testbed.db"
+             #:mode 'create))
 
 (create-all! (current-db))
 
@@ -411,10 +411,9 @@
                                               ,(task-name task))))
                        (tr (td "runner") (td ,(format "~a" (task-runner-type task))))
                        (tr (td "created-at") (td ,(datetime->iso8601 (task-created-at task))))
-                       ,@(let ((updated-at (task-updated-at task)))
-                           (if (sql-null? updated-at) null
-                               `(tr (td "updated-at")
-                                    (td ,(datetime->iso8601 updated-at))))))
+                       (tr (td "updated-at")
+                           (td ,(let ((updated-at (task-updated-at task)))
+                                  (if (sql-null? updated-at) "" (datetime->iso8601 updated-at))))))
 
                 (form ((method "post")
                        (action ,(format "/tasks/~a/run" (task-id task))))
@@ -423,6 +422,9 @@
                 (ul (li (details
                          (summary (b "runner"))
                          (div (pre ,(pretty-format (task-runner-script task))))))
+                    (li (details
+                         (summary (b "capabilities"))
+                         (div (pre ,(pretty-format (task-capabilities task))))))
 
                     (li (details (summary (b "instances")) ,(xexpr-instances)))))
           "task was not found")
@@ -448,13 +450,17 @@
                          (tr (td "runner") (td ,(format "~a" (task-instance-runner-type instance))))
                          (tr (td "host") (td ,(task-instance-host instance)))
                          (tr (td "created-at") (td ,(datetime->iso8601 (task-instance-created-at instance))))
-                         ,@(let ((updated-at (task-instance-updated-at instance)))
-                             (if (sql-null? updated-at) null
-                                 `(tr (td "updated-at")
-                                      (td ,(datetime->iso8601 updated-at))))))
+                         (tr (td "updated-at")
+                             (td ,(let ((updated-at (task-instance-updated-at instance)))
+                                    (if (sql-null? updated-at) "" (datetime->iso8601 updated-at))))))
+
                   (ul (li (details
                            (summary (b "runner"))
                            (div (pre ,(pretty-format (task-instance-runner-script instance))))))
+
+                      (li (details
+                           (summary (b "capabilities"))
+                           (div (pre ,(pretty-format (task-instance-capabilities instance))))))
 
                       (li (details
                            (summary (b "logs"))
