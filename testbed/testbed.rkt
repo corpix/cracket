@@ -403,7 +403,18 @@
                             #:height 0
                             #:border-style solid
                             #:border-width (6px 0 6px 6px)
-                            #:border-color |transparent transparent transparent red|))))
+                            #:border-color |transparent transparent transparent red|)
+                           (a.instance.state-killed::after
+                            #:content ""
+                            #:position absolute
+                            #:top 50%
+                            #:right 0
+                            #:transform |translateY(-50%)|
+                            #:width 0
+                            #:height 0
+                            #:border-style solid
+                            #:border-width (6px 0 6px 6px)
+                            #:border-color |transparent transparent transparent pink|))))
 
 (define (xexpr-page body #:title (title ""))
   `(html (head (title ,title)
