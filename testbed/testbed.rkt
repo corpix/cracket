@@ -30,34 +30,32 @@
 
 (define current-db (make-parameter #f))
 (define current-runners (make-parameter (make-hash)))
-(define task-states '(pending stopped started error killed))
-(define task-states-running '(pending started))
+(define task-states '(pending running stopped errored killed))
+(define task-states-running '(pending running))
 
 ;;
 
-(define-struct runner-job (instance thunk) #:transparent)
+(define-struct runner-job (instance thread) #:transparent)
 (define-struct runner-jobs (semaphore store) #:transparent)
 
 (define current-runner-jobs (make-parameter
                              (make-runner-jobs (make-semaphore 1)
                                                (make-hash))))
 
-(define (runner-jobs-remove! id #:jobs (jobs (current-runner-jobs)))
+(define (runner-job-register! id job #:registry (jobs (current-runner-jobs)))
+  (call-with-semaphore
+   (runner-jobs-semaphore jobs)
+   (thunk (hash-set! (runner-jobs-store jobs) id job))))
+
+(define (runner-jobs-unregister! id #:registry (jobs (current-runner-jobs)))
   (call-with-semaphore
    (runner-jobs-semaphore jobs)
    (thunk (hash-remove! (runner-jobs-store jobs) id))))
 
-(define (runner-jobs-add! id job #:jobs (jobs (current-runner-jobs)))
+(define (runner-job-ref id #:registry (jobs (current-runner-jobs)))
   (call-with-semaphore
    (runner-jobs-semaphore jobs)
-   (thunk (let* ((reconcile (thunk (runner-jobs-remove! id #:jobs jobs))))
-            (hash-set! (runner-jobs-store jobs) id
-                       (thread (thunk (dynamic-wind void (runner-job-thunk job) reconcile))))))))
-
-(define (runner-jobs-ref id #:jobs (jobs (current-runner-jobs)))
-  (call-with-semaphore
-   (runner-jobs-semaphore jobs)
-   (thunk (hash-ref (runner-jobs-store jobs) id))))
+   (thunk (hash-ref (runner-jobs-store jobs) id #f))))
 
 ;;
 
@@ -76,14 +74,7 @@
                                              (cons 'executor executor-sym))))))))))
 
 (define-runner eval (code)
-  #:executor (lambda (runner)
-               (let ((custodian (make-custodian)))
-                 (parameterize ((current-custodian custodian)
-                                (current-subprocess-custodian-mode 'kill))
-                   (void (dynamic-wind
-                           void
-                           (thunk (eval (runner-eval-code runner)))
-                           (thunk (custodian-shutdown-all custodian))))))))
+  #:executor (lambda (runner) (void (eval (runner-eval-code runner)))))
 
 (define-runner shell (command arguments)
   #:executor (lambda (runner)
@@ -91,11 +82,14 @@
                             (arguments (runner-shell-arguments runner))
                             (executable (find-executable-path command))
                             ((list out in pid err control)
-                             (apply process* executable arguments))
+                             (begin
+                               (displayln (format "running: ~a ~a" executable arguments))
+                               (apply process* executable arguments)))
                             (io (for/list ((port (list out err)))
                                   (thread (thunk
                                            (for ((line (in-lines port)))
                                              (displayln line)))))))
+                 (close-output-port in)
                  (control 'wait)
                  (dynamic-wind
                    void
@@ -109,8 +103,7 @@
                                        (make-exn:fail:user
                                         (format "shell command '~s' exited with code ~a~a"
                                                 line code (if stderr (format ", err: ~a" stderr) ""))
-                                        (current-continuation-marks)
-                                        line code stderr))))))
+                                        (current-continuation-marks)))))))
                    (thunk (for ((port (in-list io)))
                             (sync port))
                           (close-input-port out)
@@ -188,6 +181,22 @@
                        #:capabilities '()
                        #:created-at (now)))
    (insert! (current-db)
+            (make-task #:name "test shell always fail"
+                       #:description "sample shell test task which always fails"
+                       #:runner-type 'shell
+                       #:runner-script
+                       '("bash" ("-xec" "sleep 3; exit 1"))
+                       #:capabilities '()
+                       #:created-at (now)))
+   (insert! (current-db)
+            (make-task #:name "shell sleep"
+                       #:description "sample shell test task which sleeps"
+                       #:runner-type 'shell
+                       #:runner-script
+                       '("bash" ("-xec" "sleep 999996667"))
+                       #:capabilities '()
+                       #:created-at (now)))
+   (insert! (current-db)
             (make-task #:name "test-always-fails"
                        #:description "sample failing test task"
                        #:runner-type 'eval
@@ -202,6 +211,33 @@
                        #:runner-script
                        '((begin (sleep 99999999)))
                        #:capabilities '()
+                       #:created-at (now)))
+   (insert! (current-db)
+            (make-task #:name "xvfb chromium"
+                       #:description "sample chromium task"
+                       #:runner-type 'shell
+                       #:runner-script
+                       `("nix-shell"
+                         ("--pure"
+                          "-p" "xvfb-run"
+                          "-p" "x11vnc"
+                          "-p" "chromium"
+                          "--run"
+                          ,(let* ((resolution '(1280 . 1024))
+                                  (chromium-flags (list "--no-sandbox"
+                                                        (format "--window-size=~a,~a"
+                                                                (cdr resolution)
+                                                                (car resolution))
+                                                        "--disable-infobars")))
+                             (string-join `(,(format "xvfb-run --server-args '-screen 0 ~ax~ax24'"
+                                                     (car resolution)
+                                                     (cdr resolution))
+                                            "bash -ec '"
+                                            "x11vnc -bg -forever -nopw -quiet -listen localhost -xkb &"
+                                            "chromium" ,(string-join chromium-flags " ") "; wait"
+                                            "'")
+                                          " "))))
+                       #:capabilities '((vnc . 6666))
                        #:created-at (now))))
 
  ;; reset any current host task states to "error" before starting
@@ -211,7 +247,7 @@
                                      ;; fixme: index-of will not work for postgres
                                      ;; need to infer enum type in query constructor
                                      (or (= t.state ,(index-of task-states 'pending))
-                                         (= t.state ,(index-of task-states 'started))))))))
+                                         (= t.state ,(index-of task-states 'running))))))))
           (for/list ((task-instance (in-entities (current-db) query)))
             (update-task-instance-state task-instance (lambda _ 'error))))))
 
@@ -245,38 +281,58 @@
 (define (task-instance-state-set! instance state)
   (update-one! (current-db) (~> instance
                                 (update-task-instance-state _ (thunk* state))
-                                (update-task-instance-updated-at _ (thunk* (now))))))
+                                (update-task-instance-updated-at _ (thunk* (now)))))
+  (task-log-append instance (symbol->string state)))
 
 (define (task-instance-run! instance)
-  (task-log-append instance "starting")
   (let* ((runner-type (task-instance-runner-type instance))
-         (runner-script (task-instance-runner-script instance)))
-    (runner-jobs-add!
+         (runner-script (task-instance-runner-script instance))
+         (job-thunk (thunk
+                     (task-instance-state-set! instance 'running)
+                     (let*-values (((custodian) (make-custodian))
+                                   ((cancel-evt) (handle-evt (thread-receive-evt) (thunk* (thread-receive))))
+                                   ((in out) (make-pipe))
+                                   ((io-pump)
+                                    (thread (thunk
+                                             (for ((line (in-lines in)))
+                                               (task-log-append instance line)))))
+                                   ((worker-exn) #f)
+                                   ((worker-job-thread)
+                                    (parameterize ((current-output-port out)
+                                                   (current-error-port out))
+                                      (thread (thunk
+                                               (parameterize ((current-custodian custodian)
+                                                              (current-subprocess-custodian-mode 'kill)
+                                                              (subprocess-group-enabled #t))
+                                                 (with-handlers ((exn? (lambda (exn) (set! worker-exn exn))))
+                                                   (runner-execute runner-type runner-script)))))))
+                                   ((result)
+                                    (dynamic-wind
+                                      void
+                                      (thunk (sync worker-job-thread cancel-evt))
+                                      (thunk (custodian-shutdown-all custodian)
+                                             (close-output-port out)
+                                             (close-input-port in)
+                                             (sync io-pump)))))
+                       (cond
+                         ((eq? result 'kill)
+                          (task-instance-state-set! instance 'killed))
+                         (worker-exn
+                          (task-log-append instance (exn-message worker-exn))
+                          (task-instance-state-set! instance 'errored))
+                         ((thread? result)
+                          (task-instance-state-set! instance 'stopped)))))))
+    (runner-job-register!
      (task-instance-id instance)
-     (make-runner-job instance
-                      (thunk
-                       (with-handlers ((exn? (lambda (exn)
-                                               (task-log-append instance (exn-message exn))
-                                               (task-instance-state-set! instance 'error))))
-                         (let*-values (((in out) (make-pipe))
-                                       ((job) (thread (thunk (for ((line (in-lines in)))
-                                                               (task-log-append instance line))))))
-                           (parameterize ((current-output-port out))
-                             (dynamic-wind
-                               void
-                               (thunk (runner-execute runner-type runner-script))
-                               (thunk (close-output-port out)
-                                      (sync job))))
-                           (task-instance-state-set! instance 'stopped)
-                           (task-log-append instance "finished"))))))))
+     (make-runner-job instance (thread job-thunk)))))
 
 (define (task-instance-kill! instance)
-  (task-log-append instance "killing")
-  (let ((job (runner-jobs-ref (task-instance-id instance))))
-    (kill-thread job)
-    (sync job)
-    (task-instance-state-set! instance 'killed)
-    (task-log-append instance "killed")))
+  (let* ((id (task-instance-id instance))
+         (job (runner-job-ref id)))
+    (unless job
+      (error (format "job ~a is not running" id)))
+    (thread-send (runner-job-thread job) 'kill)
+    (sync (runner-job-thread job))))
 
 (define (task-instance-get id)
   (lookup (current-db)
@@ -317,7 +373,6 @@
 
 (define (css-page)
   (css-expr->css (css-expr (body #:margin (40px auto)
-                                 #:max-width 950px
                                  #:line-height 1.6
                                  #:font-size 16px
                                  #:font-family "Fira Code"
@@ -354,6 +409,8 @@
                                             #:text-transform uppercase
                                             #:box-sizing border-box)
                            (.content #:padding-top 15px)
+                           (pre #:overflow auto
+                                #:padding 20px)
 
                            (a.instance
                             #:position relative
@@ -382,7 +439,7 @@
                             #:border-style solid
                             #:border-width (6px 0 6px 6px)
                             #:border-color |transparent transparent transparent green|)
-                           (a.instance.state-started::after
+                           (a.instance.state-running::after
                             #:content ""
                             #:position absolute
                             #:top 50%
@@ -393,7 +450,7 @@
                             #:border-style solid
                             #:border-width (6px 0 6px 6px)
                             #:border-color |transparent transparent transparent yellow|)
-                           (a.instance.state-error::after
+                           (a.instance.state-errored::after
                             #:content ""
                             #:position absolute
                             #:top 50%
@@ -442,7 +499,7 @@
                   #:code http-status-not-found))
 
 (define (message/instance-not-found id)
-  (format "instance ~a was not found"))
+  (format "instance ~a was not found" id))
 
 (define (response/instance-not-found id)
   (response/xexpr (message/instance-not-found id)
@@ -529,7 +586,7 @@
                   (form ((method "post")
                          (action ,(format "/instances/~a/kill" (task-instance-id instance))))
                         (button ((type "submit")
-                                 ,@(if (memq (task-instance-state instance)task-states-running)
+                                 ,@(if (memq (task-instance-state instance) task-states-running)
                                        null
                                        '((disabled ""))))
                                 "kill"))
@@ -544,14 +601,12 @@
 
                       (li (details
                            (summary (b "logs"))
-                           (div ,@(for/fold ((acc null))
-                                            ((line (in-list logs)))
-
-                                    (append acc
-                                            `((code ,(format "~a | ~a"
-                                                             (datetime->iso8601 (task-log-timestamp line))
-                                                             (task-log-message line)))
-                                              (br))))))))))
+                           (pre ((class "scroll"))
+                                ,(for/fold ((acc ""))
+                                           ((line (in-list logs)))
+                                   (string-append acc (format "~a | ~a\n"
+                                                              (datetime->iso8601 (task-log-timestamp line))
+                                                              (task-log-message line))))))))))
           (message/instance-not-found id))
       #:title "instance"))))
 
