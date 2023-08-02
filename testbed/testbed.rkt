@@ -1,17 +1,29 @@
 #lang racket
 (require web-server/servlet
          web-server/http
+         web-server/http/response
          web-server/servlet-dispatch
          web-server/web-server
+         web-server/dispatchers/filesystem-map
+         (prefix-in files: web-server/dispatchers/dispatch-files)
+         (prefix-in filter: web-server/dispatchers/dispatch-filter)
+         (prefix-in sequencer: web-server/dispatchers/dispatch-sequencer)
+         net/url
+         net/mime-type
          gregor
          threading
          racket/os
          racket/generic
          racket/pretty
+         racket/system
+         racket/match
+         racket/string
+         racket/function
          corpix/db
          corpix/css
          corpix/strings
          corpix/struct
+         corpix/path
          (for-syntax corpix/syntax)
          "../http/http/http-router.rkt"
          "../http/http/http-status.rkt")
@@ -50,16 +62,17 @@
   (syntax-parse stx
     ((_ id:id (fields ...)
         (~seq #:executor executor-expr))
-     (with-syntax ((constructor-sym (format-id #'id "make-~a" #'id))
+     (with-syntax ((struct-name (format-id #'id "runner-~a" #'id))
+                   (constructor-sym (format-id #'id "make-~a" #'id))
                    (executor-sym (format-id #'id "~a-execute" #'id)))
        (syntax (begin
-                 (define-struct id (fields ...) #:constructor-name constructor-sym)
+                 (define-struct struct-name (fields ...) #:constructor-name constructor-sym)
                  (define executor-sym executor-expr)
-                 (hash-set! (current-runners) (symbol->string 'id)
+                 (hash-set! (current-runners) 'id
                             (make-hash (list (cons 'constructor constructor-sym)
                                              (cons 'executor executor-sym))))))))))
 
-(define-runner runner-eval (code)
+(define-runner eval (code)
   #:executor (lambda (runner)
                (let ((custodian (make-custodian)))
                  (parameterize ((current-custodian custodian)
@@ -69,7 +82,38 @@
                            (thunk (eval (runner-eval-code runner)))
                            (thunk (custodian-shutdown-all custodian))))))))
 
-(define (runner-execute type . script)
+(define-runner shell (command arguments)
+  #:executor (lambda (runner)
+               (match-let* ((command (runner-shell-command runner))
+                            (arguments (runner-shell-arguments runner))
+                            (executable (find-executable-path command))
+                            ((list out in pid err control)
+                             (apply process* executable arguments))
+                            (io (for/list ((port (list out err)))
+                                  (thread (thunk
+                                           (for ((line (in-lines port)))
+                                             (displayln line)))))))
+                 (control 'wait)
+                 (dynamic-wind
+                   void
+                   (thunk (let ((code (control 'exit-code)))
+                            (when (not (= code 0))
+                              (raise (let ((line (string-join (append (list command) arguments) " "))
+                                           (stderr (or (port-closed? err)
+                                                       (string-trim (port->string err) "\n"
+                                                                    #:left? #t
+                                                                    #:right? #t))))
+                                       (make-exn:fail:user
+                                        (format "shell command '~s' exited with code ~a~a"
+                                                line code (if stderr (format ", err: ~a" stderr) ""))
+                                        (current-continuation-marks)
+                                        line code stderr))))))
+                   (thunk (for ((port (in-list io)))
+                            (sync port))
+                          (close-input-port out)
+                          (close-input-port err))))))
+
+(define (runner-execute type script)
   (let* ((runner-description (or (hash-ref (current-runners) type #f)
                                  (error (format "runner ~v is not defined" type))))
          (constructor (hash-ref runner-description 'constructor))
@@ -78,20 +122,11 @@
 
 ;;
 
-(define-type sexpr
-  #:declaration
-  (lambda (type dialect)
-    (case dialect
-      ((sqlite3) "TEXT")
-      ((postgresql) "TEXT")))
-  #:load (lambda (_ __ value) (string->* value))
-  #:dump (lambda (_ __ value) (*->string value)))
-
 (define-schema task
   ((id id/f #:primary-key #:auto-increment)
    (name string/f #:contract non-empty-string? #:unique)
    (description string/f)
-   (runner-type string/f)
+   (runner-type symbol/f)
    (runner-script sexpr/f)
    (capabilities sexpr/f)
    (created-at datetime/f)
@@ -103,7 +138,7 @@
    (description string/f)
    (task-id id/f #:foreign-key (task id))
    (state (enum/f task-states))
-   (runner-type string/f)
+   (runner-type symbol/f)
    (runner-script sexpr/f)
    (capabilities sexpr/f)
    (host string/f)
@@ -135,54 +170,34 @@
    (insert! (current-db)
             (make-task #:name "test"
                        #:description "sample test task"
-                       #:runner-type (symbol->string 'runner-eval)
+                       #:runner-type 'eval
                        #:runner-script
-                       '(begin (require racket/system
-                                        racket/match
-                                        racket/string
-                                        racket/function)
-                               (match-let* ((executable (find-executable-path "nc"))
-                                            ((list out in pid err control)
-                                             (process* executable "-l" "8089"))
-                                            (io (for/list ((port (list out err)))
-                                                  (thread (thunk
-                                                           (for ((line (in-lines port)))
-                                                             (displayln line)))))))
-                                 (control 'wait)
-                                 (dynamic-wind
-                                   void
-                                   (thunk (let ((code (control 'exit-code)))
-                                            (when (not (= code 0))
-                                              (raise (let ((line (string-join (append (list interpreter) arguments) " "))
-                                                           (stderr (or (port-closed? err)
-                                                                       (string-trim (port->string err) "\n"
-                                                                                    #:left? #t
-                                                                                    #:right? #t))))
-                                                       (make-exn:fail:user:task:command
-                                                        (format "shell command '~s' exited with code ~a~a"
-                                                                line code (if stderr (format ", err: ~a" stderr) ""))
-                                                        (current-continuation-marks)
-                                                        line code stderr))))))
-                                   (thunk (for ((port (in-list io)))
-                                            (sync port))
-                                          (close-input-port out)
-                                          (close-input-port err)))))
-                       #:capabilities '((tcp . 8089))
+                       '((begin (displayln "hello world")
+                                (displayln "this task evals scheme code")))
+                       #:capabilities '()
+                       #:created-at (now)))
+   (insert! (current-db)
+            (make-task #:name "test shell"
+                       #:description "sample shell test task"
+                       #:runner-type 'shell
+                       #:runner-script
+                       '("bash" ("-xec" "date; ls -la"))
+                       #:capabilities '()
                        #:created-at (now)))
    (insert! (current-db)
             (make-task #:name "test-always-fails"
                        #:description "sample failing test task"
-                       #:runner-type (symbol->string 'runner-eval)
+                       #:runner-type 'eval
                        #:runner-script
-                       '(begin (error "oops"))
+                       '((begin (error "oops")))
                        #:capabilities '()
                        #:created-at (now)))
    (insert! (current-db)
             (make-task #:name "test-long-task"
                        #:description "sample test task which takes time to execute"
-                       #:runner-type (symbol->string 'runner-eval)
+                       #:runner-type 'eval
                        #:runner-script
-                       '(begin (sleep 99999999))
+                       '((begin (sleep 99999999)))
                        #:capabilities '()
                        #:created-at (now))))
 
@@ -442,7 +457,7 @@
                          (summary (b "capabilities"))
                          (div (pre ,(pretty-format (task-capabilities task))))))
 
-                    (li (details (summary (b "instances")) ,(xexpr-instances)))))
+                    (li (details (summary (b "instances")) ,(xexpr-instances (task-id task))))))
           "task was not found")
       #:title "task"))))
 
@@ -491,8 +506,17 @@
           "instance was not found")
       #:title "instance"))))
 
+(define static-dispatcher
+  (let ((url->path/static (make-url->path "static")))
+    (files:make #:url->path (lambda (u)
+                              (url->path/static
+                               (struct-copy url u [path (cdr (url-path u))])))
+                #:path->mime-type path-mime-type)))
+
 (define stop
   (serve
-   #:dispatch (dispatch/servlet http-dispatch-route)
+   #:dispatch (sequencer:make
+               (filter:make #rx"^/static/" static-dispatcher)
+               (dispatch/servlet http-dispatch-route))
    #:listen-ip "127.0.0.1"
    #:port 8000))

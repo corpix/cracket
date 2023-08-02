@@ -1,7 +1,7 @@
 #lang info
-(define pkg-name "corpix-db")
+(define pkg-name "corpix-path")
 (define collection "corpix")
-(define deps '("base" "db" "deta" "corpix-strings"))
+(define deps '("base"))
 (define build-deps '("rackunit-lib"))
 (define version "0.0")
 (define pkg-authors '(corpix))
