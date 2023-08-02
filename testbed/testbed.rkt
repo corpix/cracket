@@ -30,31 +30,34 @@
 
 (define current-db (make-parameter #f))
 (define current-runners (make-parameter (make-hash)))
-(define task-states '(pending stopped started error))
+(define task-states '(pending stopped started error killed))
+(define task-states-running '(pending started))
 
 ;;
 
 (define-struct runner-job (instance thunk) #:transparent)
-(define-struct runner-jobs (semaphore store (counter #:mutable)) #:transparent)
+(define-struct runner-jobs (semaphore store) #:transparent)
 
 (define current-runner-jobs (make-parameter
                              (make-runner-jobs (make-semaphore 1)
-                                               (make-hash)
-                                               0)))
+                                               (make-hash))))
 
 (define (runner-jobs-remove! id #:jobs (jobs (current-runner-jobs)))
   (call-with-semaphore
    (runner-jobs-semaphore jobs)
    (thunk (hash-remove! (runner-jobs-store jobs) id))))
 
-(define (runner-jobs-add! job #:jobs (jobs (current-runner-jobs)))
+(define (runner-jobs-add! id job #:jobs (jobs (current-runner-jobs)))
   (call-with-semaphore
    (runner-jobs-semaphore jobs)
-   (thunk (let* ((id (+ 1 (runner-jobs-counter jobs)))
-                 (reconcile (thunk (runner-jobs-remove! id #:jobs jobs))))
+   (thunk (let* ((reconcile (thunk (runner-jobs-remove! id #:jobs jobs))))
             (hash-set! (runner-jobs-store jobs) id
-                       (thread (thunk (dynamic-wind void (runner-job-thunk job) reconcile))))
-            (set-runner-jobs-counter! jobs id)))))
+                       (thread (thunk (dynamic-wind void (runner-job-thunk job) reconcile))))))))
+
+(define (runner-jobs-ref id #:jobs (jobs (current-runner-jobs)))
+  (call-with-semaphore
+   (runner-jobs-semaphore jobs)
+   (thunk (hash-ref (runner-jobs-store jobs) id))))
 
 ;;
 
@@ -249,6 +252,7 @@
   (let* ((runner-type (task-instance-runner-type instance))
          (runner-script (task-instance-runner-script instance)))
     (runner-jobs-add!
+     (task-instance-id instance)
      (make-runner-job instance
                       (thunk
                        (with-handlers ((exn? (lambda (exn)
@@ -265,6 +269,14 @@
                                       (sync job))))
                            (task-instance-state-set! instance 'stopped)
                            (task-log-append instance "finished"))))))))
+
+(define (task-instance-kill! instance)
+  (task-log-append instance "killing")
+  (let ((job (runner-jobs-ref (task-instance-id instance))))
+    (kill-thread job)
+    (sync job)
+    (task-instance-state-set! instance 'killed)
+    (task-log-append instance "killed")))
 
 (define (task-instance-get id)
   (lookup (current-db)
@@ -292,7 +304,7 @@
                     (where (= t.instance-id ,instance-id))
                     (order-by ((t.timestamp)))))))
 
-(define (task-run task)
+(define (task-run! task)
   (let* ((instance (task-instance-create! task)))
     (task-instance-run! instance)))
 
@@ -411,6 +423,22 @@
 
 ;;
 
+(define (message/task-not-found id)
+  (format "task ~a was not found"))
+
+(define (response/task-not-found id)
+  (response/xexpr (message/task-not-found id)
+                  #:code http-status-not-found))
+
+(define (message/instance-not-found id)
+  (format "instance ~a was not found"))
+
+(define (response/instance-not-found id)
+  (response/xexpr (message/instance-not-found id)
+                  #:code http-status-not-found))
+
+;;
+
 (define-route (/ request)
   #:method get
   (response/xexpr (xexpr-page "")))
@@ -424,16 +452,18 @@
                           ,(task-name task))))))
     #:title "tasks")))
 
-(define-route (/tasks/:task-id/run request)
+(define-route (/tasks/:task-id/instantiate request)
   #:method post
   (let ((id (http-route-parameter ':task-id)))
-    (if (task-run (task-get id))
+    (if (task-run! (task-get id))
         (redirect-to (format "/tasks/~a" id))
-        (response/xexpr "task was not found" #:code http-status-not-found))))
+        (response/task-not-found id))))
+
 
 (define-route (/tasks/:task-id request)
   #:method get
-  (let ((task (task-get (http-route-parameter ':task-id))))
+  (let* ((id (http-route-parameter ':task-id))
+         (task (task-get id)))
     (response/xexpr
      #:code (if task http-status-ok http-status-not-found)
      (xexpr-page
@@ -447,7 +477,7 @@
                                   (if (sql-null? updated-at) "" (datetime->iso8601 updated-at))))))
 
                 (form ((method "post")
-                       (action ,(format "/tasks/~a/run" (task-id task))))
+                       (action ,(format "/tasks/~a/instantiate" (task-id task))))
                       (button ((type "submit")) "instantiate"))
 
                 (ul (li (details
@@ -458,7 +488,7 @@
                          (div (pre ,(pretty-format (task-capabilities task))))))
 
                     (li (details (summary (b "instances")) ,(xexpr-instances (task-id task))))))
-          "task was not found")
+          (message/task-not-found id))
       #:title "task"))))
 
 (define-route (/instances request)
@@ -468,13 +498,13 @@
 
 (define-route (/instances/:instance-id request)
   #:method get
-  (let* ((instance-id (http-route-parameter ':instance-id))
-         (instance (task-instance-get instance-id)))
+  (let* ((id (http-route-parameter ':instance-id))
+         (instance (task-instance-get id)))
     (response/xexpr
      #:code (if instance http-status-ok http-status-not-found)
      (xexpr-page
       (if instance
-          (let ((logs (task-log-list instance-id)))
+          (let ((logs (task-log-list id)))
             `(div (table (tr (td "name") (td (a ((href ,(format "/tasks/~a" (task-instance-task-id instance))))
                                                 ,(task-instance-name instance))))
                          (tr (td "state") (td ,(format "~a" (task-instance-state instance))))
@@ -484,6 +514,14 @@
                          (tr (td "updated-at")
                              (td ,(let ((updated-at (task-instance-updated-at instance)))
                                     (if (sql-null? updated-at) "" (datetime->iso8601 updated-at))))))
+
+                  (form ((method "post")
+                         (action ,(format "/instances/~a/kill" (task-instance-id instance))))
+                        (button ((type "submit")
+                                 ,@(if (memq (task-instance-state instance)task-states-running)
+                                       null
+                                       '((disabled ""))))
+                                "kill"))
 
                   (ul (li (details
                            (summary (b "runner"))
@@ -503,8 +541,15 @@
                                                              (datetime->iso8601 (task-log-timestamp line))
                                                              (task-log-message line)))
                                               (br))))))))))
-          "instance was not found")
+          (message/instance-not-found id))
       #:title "instance"))))
+
+(define-route (/instances/:instance-id/kill request)
+  #:method post
+  (let ((id (http-route-parameter ':instance-id)))
+    (if (task-instance-kill! (task-instance-get id))
+        (redirect-to (format "/instances/~a" id))
+        (response/task-not-found id))))
 
 (define static-dispatcher
   (let ((url->path/static (make-url->path "static")))
