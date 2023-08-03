@@ -5,6 +5,7 @@
          web-server/servlet-dispatch
          web-server/web-server
          web-server/dispatchers/filesystem-map
+         web-server/dispatchers/dispatch
          (prefix-in files: web-server/dispatchers/dispatch-files)
          (prefix-in filter: web-server/dispatchers/dispatch-filter)
          (prefix-in sequencer: web-server/dispatchers/dispatch-sequencer)
@@ -24,18 +25,21 @@
          corpix/strings
          corpix/struct
          corpix/path
+         corpix/websocket
          (for-syntax corpix/syntax)
          "../http/http/http-router.rkt"
          "../http/http/http-status.rkt")
 
-(define current-db (make-parameter #f))
-(define current-runners (make-parameter (make-hash)))
-(define current-resources (make-parameter (make-hash)))
-(define current-tcp-range (make-parameter (cons 45000 46000)))
-(define current-css (make-parameter (box null)))
 (define task-states '(pending running exited errored killed))
 (define task-states-hash (for/hash ((state (in-list task-states)) (index (in-naturals))) (values state index)))
 (define task-states-running '(pending running))
+
+(define current-db (make-parameter #f))
+(define current-runners (make-parameter (make-hash)))
+(define current-runner-resources (make-parameter null))
+(define current-resources (make-parameter (make-hash)))
+(define current-tcp-range (make-parameter (cons 45000 46000)))
+(define current-css (make-parameter (box null)))
 
 ;;
 
@@ -203,9 +207,19 @@
                           (arguments (runner-shell-arguments runner))
                           (executable (find-executable-path command))
                           ((list out in pid err control)
-                           (begin
+                           (let ((environment (environment-variables-copy (current-environment-variables))))
                              (displayln (format "running: ~a ~a" executable arguments))
-                             (apply process* executable arguments)))
+                             (parameterize ((current-environment-variables environment))
+                               (for (((type resource-instance) (in-hash (current-runner-resources))))
+                                 (for (((variable value) (in-hash (resource-environment type (resource-instance-data resource-instance)))))
+                                   (environment-variables-set!
+                                    environment
+                                    (string->bytes/utf-8
+                                     (format "~a_~a"
+                                             (string-replace (format "~a" type) "-" "_")
+                                             (string-replace (format "~a" variable) "-" "_")))
+                                    (string->bytes/utf-8 (format "~a" value)))))
+                               (apply process* executable arguments))))
                           (io (for/list ((port (list out err)))
                                 (thread (thunk
                                          (for ((line (in-lines port)))
@@ -230,41 +244,83 @@
                         (close-input-port out)
                         (close-input-port err)))))
 
-(define (runner-descriptor type)
+(define (runner-table type)
   (or (hash-ref (current-runners) type #f)
       (error (format "runner ~v is not defined" type))))
 
 (define (runner-execute type arguments)
-  (let* ((descriptor (runner-descriptor type))
-         (construct (hash-ref descriptor 'constructor))
-         (execute (hash-ref descriptor 'executor)))
+  (let* ((table (runner-table type))
+         (construct (hash-ref table 'constructor))
+         (execute (hash-ref table 'executor)))
     (execute (apply construct arguments))))
+
+;;
+
+(define-struct resource-dispatchers (semaphore store) #:transparent)
+(define current-resource-dispatchers
+  (make-parameter (make-resource-dispatchers (make-semaphore 1) (make-hash))))
+
+(define (resource-dispatcher-register! path dispatcher #:registry (dispatchers (current-resource-dispatchers)))
+  (call-with-semaphore
+   (resource-dispatchers-semaphore dispatchers)
+   (thunk (hash-set! (resource-dispatchers-store dispatchers) path dispatcher))))
+
+(define (resource-dispatcher-unregister! path #:registry (dispatchers (current-resource-dispatchers)))
+  (call-with-semaphore
+   (resource-dispatchers-semaphore dispatchers)
+   (thunk (hash-remove! (resource-dispatchers-store dispatchers) path))))
+
+(define (resource-dispatcher-ref path #:registry (dispatchers (current-resource-dispatchers)))
+  (call-with-semaphore
+   (resource-dispatchers-semaphore dispatchers)
+   (thunk (hash-ref (resource-dispatchers-store dispatchers) path #f))))
+
+(define (resources-dispatcher conn request)
+  (let* ((resource-dispatchers (current-resource-dispatchers))
+         (dispatcher (call-with-semaphore
+                      (resource-dispatchers-semaphore resource-dispatchers)
+                      (thunk (hash-ref (resource-dispatchers-store resource-dispatchers)
+                                       (path->string (url->path (request-uri request))) #f)))))
+    (if dispatcher
+        (dispatcher conn request)
+        (next-dispatcher))))
 
 ;;
 
 (define-syntax (define-resource stx)
   (syntax-parse stx
     ((_ (id:id resource-instance-id:id (fields ...))
+        (~optional (~seq #:bindings bindings-expr) #:defaults ((bindings-expr #'())))
         (~seq #:prelude prelude-expr)
         (~seq #:allocator allocator-expr)
+        (~seq #:deallocator deallocator-expr)
+        (~seq #:environment environment-expr)
         (~seq #:representor representor-expr))
      (with-syntax* ((struct-name (format-id #'id "resource-~a" #'id))
                     (constructor-sym (format-id #'id "make-~a" #'struct-name))
                     (allocator-sym (format-id #'id "~a-allocator" #'struct-name))
+                    (deallocator-sym (format-id #'id "~a-deallocator" #'struct-name))
+                    (environment-sym (format-id #'id "~a-environment" #'struct-name))
                     (representor-sym (format-id #'id "~a-representor" #'struct-name)))
-       (syntax (begin
+       (syntax (let* bindings-expr
                  (define-struct struct-name (fields ...)
                    #:constructor-name constructor-sym
                    #:transparent)
                  (define (allocator-sym) allocator-expr)
+                 (define (deallocator-sym resource-instance-id) deallocator-expr)
+                 (define (environment-sym resource-instance-id) environment-expr)
                  (define (representor-sym resource-instance-id) representor-expr)
                  (void prelude-expr)
                  (hash-set! (current-resources) 'id
                             (make-hash (list (cons 'constructor constructor-sym)
                                              (cons 'allocator allocator-sym)
+                                             (cons 'deallocator deallocator-sym)
+                                             (cons 'environment environment-sym)
                                              (cons 'representor representor-sym))))))))))
 
-(define-resource (vnc resource (port))
+(define-resource (vnc resource (address port))
+  #:bindings ((address "127.0.0.1")
+              (websocket-endpoint (lambda (port) (format "/resources/vnc/~a" port))))
   #:prelude
   (css-append! (css-expr (.vnc-representor #:width 100% #:min-height 780px)))
   #:allocator
@@ -278,34 +334,61 @@
                       (where (and (= t.host ,(gethostname))
                                   (= r.type "vnc")
                                   (or (= t.state ,(hash-ref task-states-hash 'pending))
-                                      (= t.state ,(hash-ref task-states-hash 'running))))))))
-      (make-resource-vnc
-       (let loop ((port (next))
-                  (attempts 10))
-         (when (<= attempts 0)
-           (error "run out of attempts to allocate tcp port number for vnc resource"))
-         (for/fold ((port port))
-                   ((resource-instance (in-entities (current-db) query)))
-           (if (= (car (resource-instance-data resource-instance)) port)
-               (loop (next) (- attempts 1)) port)))))))
+                                      (= t.state ,(hash-ref task-states-hash 'running)))))))
+           (port (let loop ((port (next))
+                            (attempts 10))
+                   (when (<= attempts 0)
+                     (error "run out of attempts to allocate tcp port number for vnc resource"))
+                   (for/fold ((port port))
+                             ((resource-instance (in-entities (current-db) query)))
+                     (if (= (car (resource-instance-data resource-instance)) port)
+                         (loop (next) (- attempts 1)) port)))))
+
+      (resource-dispatcher-register!
+       (websocket-endpoint port)
+       (make-websocket-dispatcher (make-websocket-pipe-connection-handler address port)))
+      (make-resource-vnc address port))))
+  #:deallocator
+  (resource-dispatcher-unregister! (resource-vnc-port resource))
+  #:environment
+  (make-hash (list (cons 'address (resource-vnc-address resource))
+                   (cons 'port (resource-vnc-port resource))))
   #:representor
   `(iframe ((class "vnc-representor")
-            (src ,(format "/static/vnc/?path=resources/vnc/~a" (resource-vnc-port resource))))))
+            (src ,(format "/static/vnc/?path=~a"
+                          (string-trim (websocket-endpoint (resource-vnc-port resource))
+                                       "/"
+                                       #:left? #t
+                                       #:right? #f))))))
 
-(define (resource-descriptor type)
+(define (resource-table type)
   (or (hash-ref (current-resources) type #f)
       (error (format "resource ~v is not defined" type))))
 
+(define (resource-construct type data)
+  (let* ((table (resource-table type))
+         (construct (hash-ref table 'constructor)))
+    (apply construct data)))
+
 (define (resource-allocate type)
-  (let* ((descriptor (resource-descriptor type))
-         (allocate (hash-ref descriptor 'allocator)))
+  (let* ((table (resource-table type))
+         (allocate (hash-ref table 'allocator)))
     (allocate)))
 
+(define (resource-deallocate type data)
+  (let* ((table (resource-table type))
+         (deallocate (hash-ref table 'deallocator)))
+    (deallocate (resource-construct type data))))
+
+(define (resource-environment type data)
+  (let* ((table (resource-table type))
+         (environment (hash-ref table 'environment)))
+    (environment (resource-construct type data))))
+
 (define (resource-represent type data)
-  (let* ((descriptor (resource-descriptor type))
-         (construct (hash-ref descriptor 'constructor))
-         (represent (hash-ref descriptor 'representor)))
-    (represent (apply construct data))))
+  (let* ((table (resource-table type))
+         (represent (hash-ref table 'representor)))
+    (represent (resource-construct type data))))
 
 ;;
 
@@ -387,6 +470,12 @@
                     #:task-instance-id (task-instance-id task-instance)
                     #:data (struct-data (resource-allocate (resource-type resource)))))))))
 
+(define (resource-instances-list task-instance)
+  (let* ((query (~> (from resource-instance #:as r)
+                    (where (= r.task-instance-id ,(task-instance-id task-instance)))))
+         (sequence (in-entities (current-db) query)))
+    (sequence->list sequence)))
+
 (define (task-instance-create! task)
   (call-with-transaction
    (current-db)
@@ -417,6 +506,69 @@
     (let ((task (insert-one! (current-db) task)))
       (begin0 task
         (resources-create! resources #:task task))))))
+
+(define (task-instance-run! instance)
+  (let* ((runner-type (task-instance-runner-type instance))
+         (runner-script (task-instance-runner-script instance))
+         (instance-resources
+          (for/hash ((resource-instance (task-instance-resources-list instance)))
+            (values (resource-instance-type resource-instance) resource-instance)))
+         (job-thunk (thunk
+                     (task-instance-state-set! instance 'running)
+                     (let*-values (((custodian) (make-custodian))
+                                   ((cancel-evt) (handle-evt (thread-receive-evt) (thunk* (thread-receive))))
+                                   ((in out) (make-pipe))
+                                   ((io-pump) (thread (thunk
+                                                       (for ((line (in-lines in)))
+                                                         (task-instance-log-append! instance line)))))
+                                   ((worker-exn) #f)
+                                   ((worker-job-thread)
+                                    (parameterize ((current-output-port out)
+                                                   (current-error-port out))
+                                      (thread (thunk
+                                               (parameterize ((current-custodian custodian)
+                                                              (current-subprocess-custodian-mode 'kill)
+                                                              (subprocess-group-enabled #t)
+                                                              (current-runner-resources instance-resources))
+                                                 (with-handlers ((exn? (lambda (exn) (set! worker-exn exn))))
+                                                   (runner-execute runner-type runner-script)))))))
+                                   ((result)
+                                    (dynamic-wind
+                                      void
+                                      (thunk (sync worker-job-thread cancel-evt))
+                                      (thunk (custodian-shutdown-all custodian)
+                                             (close-output-port out)
+                                             (sync io-pump)
+                                             (close-input-port in)))))
+                       (cond
+                         ((eq? result 'kill)
+                          (task-instance-state-set! instance 'killed))
+                         (worker-exn
+                          (task-instance-log-append! instance (exn-message worker-exn))
+                          (task-instance-state-set! instance 'errored))
+                         ((thread? result)
+                          (task-instance-state-set! instance 'exited)))))))
+    (runner-job-register!
+     (task-instance-id instance)
+     (make-runner-job instance (thread job-thunk)))))
+
+(define (task-instance-kill! instance)
+  (let* ((id (task-instance-id instance))
+         (job (runner-job-ref id)))
+    (unless job
+      (error (format "job ~a is not running" id)))
+    (call-with-transaction
+     (current-db)
+     (thunk (let ((resource-instances (resource-instances-list instance)))
+              (for ((resource-instance (in-list resource-instances)))
+                (resource-deallocate (resource-instance-type resource-instance)
+                                     (resource-instance-data resource-instance))))))
+    (thread-send (runner-job-thread job) 'kill)
+    (sync (runner-job-thread job))))
+
+(define (task-run! task)
+  (let* ((task-instance (task-instance-create! task)))
+    (task-instance-run! task-instance)))
 
 ;;
 
@@ -457,61 +609,6 @@
                     (order-by ((i.id)))))
          (sequence (in-entities (current-db) query)))
     (sequence->list sequence)))
-
-;;
-
-(define (task-instance-run! instance)
-  (let* ((runner-type (task-instance-runner-type instance))
-         (runner-script (task-instance-runner-script instance))
-         (job-thunk (thunk
-                     (task-instance-state-set! instance 'running)
-                     (let*-values (((custodian) (make-custodian))
-                                   ((cancel-evt) (handle-evt (thread-receive-evt) (thunk* (thread-receive))))
-                                   ((in out) (make-pipe))
-                                   ((io-pump) (thread (thunk
-                                                       (for ((line (in-lines in)))
-                                                         (task-instance-log-append! instance line)))))
-                                   ((worker-exn) #f)
-                                   ((worker-job-thread)
-                                    (parameterize ((current-output-port out)
-                                                   (current-error-port out))
-                                      (thread (thunk
-                                               (parameterize ((current-custodian custodian)
-                                                              (current-subprocess-custodian-mode 'kill)
-                                                              (subprocess-group-enabled #t))
-                                                 (with-handlers ((exn? (lambda (exn) (set! worker-exn exn))))
-                                                   (runner-execute runner-type runner-script)))))))
-                                   ((result)
-                                    (dynamic-wind
-                                      void
-                                      (thunk (sync worker-job-thread cancel-evt))
-                                      (thunk (custodian-shutdown-all custodian)
-                                             (close-output-port out)
-                                             (sync io-pump)
-                                             (close-input-port in)))))
-                       (cond
-                         ((eq? result 'kill)
-                          (task-instance-state-set! instance 'killed))
-                         (worker-exn
-                          (task-instance-log-append! instance (exn-message worker-exn))
-                          (task-instance-state-set! instance 'errored))
-                         ((thread? result)
-                          (task-instance-state-set! instance 'exited)))))))
-    (runner-job-register!
-     (task-instance-id instance)
-     (make-runner-job instance (thread job-thunk)))))
-
-(define (task-instance-kill! instance)
-  (let* ((id (task-instance-id instance))
-         (job (runner-job-ref id)))
-    (unless job
-      (error (format "job ~a is not running" id)))
-    (thread-send (runner-job-thread job) 'kill)
-    (sync (runner-job-thread job))))
-
-(define (task-run! task)
-  (let* ((task-instance (task-instance-create! task)))
-    (task-instance-run! task-instance)))
 
 ;;
 
@@ -675,8 +772,9 @@
 
 (define-route (/tasks/instances/:task-instance-id/kill request)
   #:method post
-  (let ((id (http-route-parameter ':task-instance-id)))
-    (if (task-instance-kill! (task-instance-get id))
+  (let* ((id (http-route-parameter ':task-instance-id))
+         (task-instance (task-instance-get id)))
+    (if (and task-instance (task-instance-kill! task-instance))
         (redirect-to (format "/tasks/instances/~a" id))
         (response-task-not-found id))))
 
@@ -716,7 +814,7 @@
                           #:description "sample shell test task which sleeps"
                           #:runner-type 'shell
                           #:runner-script
-                          '("bash" ("-xec" "sleep 999996667"))
+                          '("bash" ("-xec" "echo $vnc_address $vnc_port; sleep 999996667"))
                           #:created-at (now))
                #:resources (list (make-resource #:type 'vnc)))
  (task-create! (make-task #:name "test-always-fails"
@@ -737,6 +835,8 @@
                           #:runner-script
                           `("nix-shell"
                             ("--pure"
+                             "--keep" "vnc_address"
+                             "--keep" "vnc_port"
                              "-p" "xvfb-run"
                              "-p" "x11vnc"
                              "-p" "chromium"
@@ -750,8 +850,8 @@
                                 (string-join `(,(format "xvfb-run --server-args '-screen 0 ~ax~ax24'"
                                                         (car resolution)
                                                         (cdr resolution))
-                                               "bash -ec '"
-                                               "x11vnc -bg -forever -nopw -quiet -listen localhost -xkb &"
+                                               "bash -xec '"
+                                               "x11vnc -bg -forever -nopw -quiet -listen $vnc_address -rfbport $vnc_port -xkb &"
                                                "chromium" ,(string-join chromium-flags " ") "; wait"
                                                "'")
                                              " "))))
@@ -772,6 +872,7 @@
    #:dispatch (sequencer:make
                (filter:make #rx"^/favicon\\.ico$" (lambda (conn request) (response/empty)))
                (filter:make #rx"^/static/" static-dispatcher)
+               resources-dispatcher
                (dispatch/servlet http-dispatch-route))
    #:listen-ip "127.0.0.1"
    #:port 8000))
