@@ -9,8 +9,10 @@
          corpix/url
          corpix/multipart
          corpix/hex
-         "./http-status.rkt")
+         "./http-status.rkt"
+         "./http-router.rkt")
 (provide (all-from-out "./http-status.rkt")
+         (all-from-out "./http-router.rkt")
 
          http-tls-security
 
