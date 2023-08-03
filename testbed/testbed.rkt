@@ -280,12 +280,14 @@
                                   (or (= t.state ,(hash-ref task-states-hash 'pending))
                                       (= t.state ,(hash-ref task-states-hash 'running))))))))
       (make-resource-vnc
-       (let loop ((port (next)))
+       (let loop ((port (next))
+                  (attempts 10))
+         (when (<= attempts 0)
+           (error "run out of attempts to allocate tcp port number for vnc resource"))
          (for/fold ((port port))
                    ((resource-instance (in-entities (current-db) query)))
-           (let ((record (assoc port (resource-instance-data))))
-             (if (and record (= (cdr record) port))
-                 (loop (next)) port))))))))
+           (if (= (car (resource-instance-data resource-instance)) port)
+               (loop (next) (- attempts 1)) port)))))))
   #:representor
   `(iframe ((class "vnc-representor")
             (src ,(format "/static/vnc/?path=resources/vnc/~a" (resource-vnc-port resource))))))
