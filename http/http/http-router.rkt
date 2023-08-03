@@ -12,7 +12,7 @@
 (define current-route-context (make-parameter #f))
 
 (define-struct route (name method path handler) #:transparent)
-(define-struct route-matcher (name priority match apply) #:transparent)
+(define-struct route-matcher (name priority constructor match apply) #:transparent)
 (define-struct route-tree-node (value (route #:mutable) matcher (childs #:mutable))
   #:constructor-name -make-route-tree-node
   #:transparent)
@@ -27,9 +27,10 @@
                       ((matcher-name (sort (hash-keys matchers) symbol<?)))
               #:break result
               (let* ((matcher (hash-ref matchers matcher-name))
+                     (constructor (route-matcher-constructor matcher))
                      (match (route-matcher-match matcher)))
                 (and (match matcher input)
-                     (-make-route-tree-node input route matcher null))))))
+                     (-make-route-tree-node (constructor input) route matcher null))))))
         (error (format "no matcher for input ~v" input)))))
 
 (define (make-route-tree route)
@@ -50,11 +51,11 @@
   (for/fold ((acc null))
             ((group (in-list (group-by key route-trees))))
     (let ((route-tree-node-acc (struct-copy route-tree-node (car group))))
-      (begin0 (cons route-tree-node-acc acc)
+      (begin0 (append acc (list route-tree-node-acc))
         (for ((route-tree-node (in-list (cdr group))))
           (let ((childs (merge-route-tree
-                         (append (route-tree-node-childs route-tree-node-acc)
-                                 (route-tree-node-childs route-tree-node))
+                         (append (route-tree-node-childs route-tree-node)
+                                 (route-tree-node-childs route-tree-node-acc))
                          #:key key)))
             (set-route-tree-node-childs! route-tree-node-acc childs)
             (let ((route (route-tree-node-route route-tree-node)))
@@ -90,32 +91,36 @@
          (index (current-routes-index)))
     (hash-set! routes-bucket (route-name route) route)
     (hash-set! routes method routes-bucket)
-    (hash-set! index method (merge-route-tree (append (hash-ref index method null)
-                                                      (make-route-tree route))))))
+    (hash-set! index method (merge-route-tree (append (make-route-tree route)
+                                                      (hash-ref index method null))))))
 
 (define-syntax (define-route stx)
   (syntax-parse stx
     ((_ (name argument ...)
+        (~optional (~seq #:bindings let-bindings-expr) #:defaults ((let-bindings-expr #'())))
         #:method method
         (~optional (~seq #:path path) #:defaults ((path #'(symbol->string 'name))))
         body ...)
-     (syntax/loc stx
-       (let* ((name-sym 'name)
-              (method-sym (string->bytes/utf-8 (string-upcase (symbol->string 'method))))
-              (path-sym path))
-         (when (eq? (current-route-define-mode) 'strict)
-           (let ((route (find-route name-sym)))
-             (when route
-               (error (format "route with name ~v already defined for method ~v with path ~v"
-                              name-sym (route-method route) (route-path route))))))
-         (void (set-route! method-sym (make-route name-sym method-sym path-sym
-                                                  (lambda (argument ...) body ...)))))))))
+     (syntax
+       (let* let-bindings-expr
+         (let* ((name-sym 'name)
+                (method-sym (string->bytes/utf-8 (string-upcase (symbol->string 'method))))
+                (path-sym path))
+           (when (eq? (current-route-define-mode) 'strict)
+             (let ((route (find-route name-sym)))
+               (when route
+                 (error (format "route with name ~v already defined for method ~v with path ~v"
+                                name-sym (route-method route) (route-path route))))))
+           (void (set-route! method-sym (make-route name-sym method-sym path-sym
+                                                    (lambda (argument ...) body ...))))))))))
 
 (define-syntax (define-route-matcher stx)
   (syntax-parse stx
     #:datum-literals (define)
     ((_ name
         (~optional (~seq #:priority prio) #:defaults ((prio #'1)))
+        (~optional (~seq #:constructor constructor-proc)
+                   #:defaults ((constructor-proc #'(lambda (v) v))))
         #:match match-proc
         #:apply apply-proc
         (define (method arguments ...) body ...) ...)
@@ -126,7 +131,9 @@
                  (set-route-matcher!
                   name-sym prio-sym
                   (make-route-matcher name-sym prio-sym
-                                      match-proc apply-proc))))))))
+                                      constructor-proc
+                                      match-proc
+                                      apply-proc))))))))
 
 (define (dispatch-route-tree tree inputs)
   (let loop ((tree tree)
@@ -160,9 +167,10 @@
   #:apply (lambda (matcher node input)
             (equal? (route-tree-node-value node) input)))
 
-(define-route-matcher wildcard
+(define-route-matcher regexp
   #:priority 2
-  #:match (let ((rx (regexp ".*[\\*]+.*")))
+  #:constructor regexp
+  #:match (let ((rx (regexp "^\\^.+\\$$")))
             (lambda (matcher input)
               (and (string? input)
                    (regexp-match rx input))))
