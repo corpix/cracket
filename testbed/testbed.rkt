@@ -856,14 +856,13 @@
                           #:description "sample chromium task"
                           #:runner-type 'isolated-shell
                           #:runner-script
-                          `((
+                          `(("--die-with-parent"
                              "--ro-bind" "/" "/"
                              "--dev-bind" "/dev" "/dev"
                              "--tmpfs" "/home"
                              "--tmpfs" "/tmp"
                              "--tmpfs" ,(format "/run/user/~a" (getuid))
-                             "--proc" "/proc"
-                             "--die-with-parent")
+                             "--proc" "/proc")
                             "nix-shell"
                             ("--pure"
                              "--keep" "vnc_address"
@@ -872,21 +871,18 @@
                              "-p" "x11vnc"
                              "-p" "chromium"
                              "--run"
-                             ,(let* ((resolution '(1280 . 1024))
-                                     (chromium-flags (list "--no-sandbox"
-                                                           (format "--window-size=~a,~a"
-                                                                   (cdr resolution)
-                                                                   (car resolution))
-                                                           "--disable-infobars")))
-                                (string-join `(,(format "xvfb-run -n $vnc_port --server-args '-screen 0 ~ax~ax24'"
-                                                        (car resolution)
-                                                        (cdr resolution))
-                                               "bash -xec '"
-                                               "env;"
-                                               "x11vnc -bg -forever -nopw -quiet -listen $vnc_address -rfbport $vnc_port -xkb &"
-                                               "chromium" ,(string-join chromium-flags " ") "; wait"
-                                               "'")
-                                             " "))))
+                             ,(let* ((resolution '(1280 . 1024)))
+                                (string-join
+                                 `(,(format "xvfb-run -n $vnc_port --server-args '-screen 0 ~ax~ax24'"
+                                            (car resolution)
+                                            (cdr resolution))
+                                   "bash -xec '"
+                                   "x11vnc -bg -forever -nopw -quiet -listen $vnc_address -rfbport $vnc_port -xkb &"
+                                   ,(format "chromium --no-sandbox --window-size=~a,~a --disable-infobars;"
+                                            (cdr resolution)
+                                            (car resolution))
+                                   "wait'")
+                                 " "))))
                           #:created-at (now))
                #:resources (list (make-resource #:type 'vnc)))
 
