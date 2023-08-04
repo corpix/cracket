@@ -13,13 +13,13 @@
          net/mime-type
          gregor
          threading
-         racket/os
          racket/generic
          racket/pretty
          racket/system
          racket/match
          racket/string
          racket/function
+         corpix/os
          corpix/db
          corpix/css
          corpix/strings
@@ -244,6 +244,14 @@
                         (close-input-port out)
                         (close-input-port err)))))
 
+(define-runner (isolated-shell runner (isolation command arguments))
+  #:executor (runner-execute
+              'shell
+              (list "bwrap"
+                    (append (runner-isolated-shell-isolation runner)
+                            (list (runner-isolated-shell-command runner))
+                            (runner-isolated-shell-arguments runner)))))
+
 (define (runner-table type)
   (or (hash-ref (current-runners) type #f)
       (error (format "runner ~v is not defined" type))))
@@ -341,8 +349,9 @@
                      (error "run out of attempts to allocate tcp port number for vnc resource"))
                    (for/fold ((port port))
                              ((resource-instance (in-entities (current-db) query)))
-                     (if (= (car (resource-instance-data resource-instance)) port)
-                         (loop (next) (- attempts 1)) port)))))
+                     (let ((resource (apply make-resource-vnc (resource-instance-data resource-instance))))
+                       (if (= (resource-vnc-port resource) port)
+                         (loop (next) (- attempts 1)) port))))))
 
       (resource-dispatcher-register!
        (websocket-endpoint port)
@@ -814,9 +823,23 @@
                           #:description "sample shell test task which sleeps"
                           #:runner-type 'shell
                           #:runner-script
-                          '("bash" ("-xec" "echo $vnc_address $vnc_port; sleep 999996667"))
-                          #:created-at (now))
-               #:resources (list (make-resource #:type 'vnc)))
+                          '("bash" ("-xec" "sleep 999996667"))
+                          #:created-at (now)))
+ (task-create! (make-task #:name "isolated shell"
+                          #:description "sample shell test task which is isolated"
+                          #:runner-type 'isolated-shell
+                          #:runner-script
+                          '((
+                             "--ro-bind" "/" "/"
+                             "--dev-bind" "/dev" "/dev"
+                             "--tmpfs" "/home"
+                             "--tmpfs" "/tmp"
+                             "--proc" "/proc"
+                             "--setenv" "HOME" "/home"
+                             "--die-with-parent")
+                            "bash"
+                            ("-xec" "ls -la ~/ /tmp"))
+                          #:created-at (now)))
  (task-create! (make-task #:name "test-always-fails"
                           #:description "sample failing test task"
                           #:runner-type 'eval
@@ -831,9 +854,17 @@
                           #:created-at (now)))
  (task-create! (make-task #:name "xvfb chromium"
                           #:description "sample chromium task"
-                          #:runner-type 'shell
+                          #:runner-type 'isolated-shell
                           #:runner-script
-                          `("nix-shell"
+                          `((
+                             "--ro-bind" "/" "/"
+                             "--dev-bind" "/dev" "/dev"
+                             "--tmpfs" "/home"
+                             "--tmpfs" "/tmp"
+                             "--tmpfs" ,(format "/run/user/~a" (getuid))
+                             "--proc" "/proc"
+                             "--die-with-parent")
+                            "nix-shell"
                             ("--pure"
                              "--keep" "vnc_address"
                              "--keep" "vnc_port"
@@ -847,10 +878,11 @@
                                                                    (cdr resolution)
                                                                    (car resolution))
                                                            "--disable-infobars")))
-                                (string-join `(,(format "xvfb-run --server-args '-screen 0 ~ax~ax24'"
+                                (string-join `(,(format "xvfb-run -n $vnc_port --server-args '-screen 0 ~ax~ax24'"
                                                         (car resolution)
                                                         (cdr resolution))
                                                "bash -xec '"
+                                               "env;"
                                                "x11vnc -bg -forever -nopw -quiet -listen $vnc_address -rfbport $vnc_port -xkb &"
                                                "chromium" ,(string-join chromium-flags " ") "; wait"
                                                "'")
