@@ -32,11 +32,11 @@
 (define (read-clickhouse (port (current-input-port)))
   (skip-whitespace port)
   (case (peek-char port)
-    ((#\() (read/tuple  port))
-    ((#\() (read/list   port))
+    ((#\() (read/tuple port))
+    ((#\() (read/list port))
     ((#\') (read/string port))
-    ((#\\) (read/null   port))
-    (else  (read/number port))))
+    ((#\\) (read/null port))
+    (else (read/number port))))
 
 (define (read/sequence start stop port)
   (expect (read-char port) start)
@@ -60,15 +60,15 @@
 (define (read/digits port)
   (let ((digits
          (for/list
-             ((digit (in-port-until
-                      port
-                      read-char
-                      (lambda (port)
-                        (let ((ch (peek-char port)))
-                          (or (eof-object? ch)
-                              (not (or
-                                    (char-numeric? ch)
-                                    (char=? #\. ch)))))))))
+ ((digit (in-port-until
+          port
+          read-char
+          (lambda (port)
+            (let ((ch (peek-char port)))
+              (or (eof-object? ch)
+                  (not (or
+                        (char-numeric? ch)
+                        (char=? #\. ch)))))))))
            digit)))
     (when (and (null? digits) (eof-object? (peek-char port)))
       (error 'read "unexpected EOF"))
@@ -81,22 +81,22 @@
   (begin0
       (list->string
        (for/list
-           ((ch (in-port-until
-                 port
-                 (lambda (port)
-                   (let ((ch (read-char port)))
-                     (when (eof-object? ch)
-                       (error 'read "unexpected EOF"))
-                     (if (eq? ch #\\)
-                         (let ((esc (read-char port)))
-                           (when (eof-object? ch)
-                             (error 'read "unexpected EOF"))
-                           (case esc
-                             ((#\') #\')
-                             (else esc)))
-                         ch)))
-                 (lambda (port)
-                   (eq? (peek-char port) #\')))))
+ ((ch (in-port-until
+       port
+       (lambda (port)
+         (let ((ch (read-char port)))
+           (when (eof-object? ch)
+             (error 'read "unexpected EOF"))
+           (if (eq? ch #\\)
+               (let ((esc (read-char port)))
+                 (when (eof-object? ch)
+                   (error 'read "unexpected EOF"))
+                 (case esc
+                   ((#\') #\')
+                   (else esc)))
+               ch)))
+       (lambda (port)
+         (eq? (peek-char port) #\')))))
          ch))
     (expect (read-char port) #\')))
 
@@ -113,9 +113,9 @@
      (list->string
       (append sign digits frac)))))
 
-(define (read/list  port) (read/sequence #\( #\) port))
+(define (read/list port) (read/sequence #\( #\) port))
 (define (read/tuple port) (read/sequence #\( #\) port))
-(define (read/null  port) (expect-string port "\\N") 'null)
+(define (read/null port) (expect-string port "\\N") 'null)
 
 (module+ test
   (require rackunit)

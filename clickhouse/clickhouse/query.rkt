@@ -15,10 +15,10 @@
          clickhouse
          (struct-out exn:fail:user:clickhouse:query)
          (contract-out
-          (clickhouse-query-raw     (-> clickhouse-connection? (or/c string? clickhouse-sql-statement?) generator?))
+          (clickhouse-query-raw (-> clickhouse-connection? (or/c string? clickhouse-sql-statement?) generator?))
           (clickhouse-query-convert (-> generator? procedure? list? generator?))
-          (clickhouse-query         (-> clickhouse-connection? (or/c string? clickhouse-sql-statement?) generator?))
-          (clickhouse-query!        (-> clickhouse-connection? (or/c string? clickhouse-sql-statement?) void?))))
+          (clickhouse-query (-> clickhouse-connection? (or/c string? clickhouse-sql-statement?) generator?))
+          (clickhouse-query! (-> clickhouse-connection? (or/c string? clickhouse-sql-statement?) void?))))
 
 (define current-clickhouse-schema (make-parameter null))
 
@@ -32,7 +32,7 @@
                        (clickhouse-connection-port connection)
                        "/"
                        #:method 'post
-                       #:headers '((connection   . "keep-alive")
+                       #:headers '((connection . "keep-alive")
                                    (content-type . "application/x-www-form-urlencoded"))
                        #:body sql)))
 

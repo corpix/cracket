@@ -40,7 +40,7 @@
            (let loop ()
              (define timer-evt (alarm-evt (+ (current-milliseconds) time)))
              (define v (sync timer-evt (send batch flush-evt) (thread-receive-evt)))
-             (cond ((notify-evt? v)   (loop))
+             (cond ((notify-evt? v) (loop))
                    ((eq? v timer-evt) (send batch flush!) (loop)))))))
 
 (module+ test

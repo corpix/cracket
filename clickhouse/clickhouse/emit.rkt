@@ -14,8 +14,8 @@
 (define (clickhouse-emit-statement ast)
   (match (clickhouse-sql-statement-value ast)
     ((? clickhouse-sql-create-table? ast) (clickhouse-emit-create-table ast))
-    ((? clickhouse-sql-insert?       ast) (clickhouse-emit-insert ast))
-    ((? clickhouse-sql-select?       ast) (clickhouse-emit-select ast))))
+    ((? clickhouse-sql-insert? ast) (clickhouse-emit-insert ast))
+    ((? clickhouse-sql-select? ast) (clickhouse-emit-select ast))))
 
 (define (clickhouse-emit-value ast)
   (match ast
@@ -30,10 +30,10 @@
 
 (define (clickhouse-emit-type ast)
   (match ast
-    ((? string?)         ast)
-    ((? number?)         (number->string ast))
-    ((? symbol?)         (symbol->string ast))
-    ((? clickhouse-sql-mapping?)    (clickhouse-emit-mapping ast))
+    ((? string?) ast)
+    ((? number?) (number->string ast))
+    ((? symbol?) (symbol->string ast))
+    ((? clickhouse-sql-mapping?) (clickhouse-emit-mapping ast))
     ((? clickhouse-sql-expression?) (clickhouse-emit-expression ast))
 
     ;; XXX: Nested is something special.
@@ -72,9 +72,9 @@
 
 (define (clickhouse-emit-expression ast)
   (match ast
-    ((? clickhouse-sql-function?)  (clickhouse-emit-function ast))
+    ((? clickhouse-sql-function?) (clickhouse-emit-function ast))
     ((? clickhouse-sql-parameter?) (clickhouse-emit-parameter ast))
-    ((? clickhouse-sql-tuple?)     (clickhouse-emit-tuple ast))
+    ((? clickhouse-sql-tuple?) (clickhouse-emit-tuple ast))
 
     ((clickhouse-sql-expression name value)
      (string-append
@@ -101,15 +101,15 @@
 
 (define (clickhouse-emit-from ast)
   (match ast
-    ((? string?)        (string-append "FROM " ast))
-    ((? symbol?)        (clickhouse-emit-from (symbol->string ast)))
+    ((? string?) (string-append "FROM " ast))
+    ((? symbol?) (clickhouse-emit-from (symbol->string ast)))
     ((? clickhouse-sql-parameter?) (clickhouse-emit-from (clickhouse-emit-parameter ast)))
-    ((? clickhouse-sql-select?)    (clickhouse-emit-from (string-append "(" (clickhouse-emit-select ast) ")")))))
+    ((? clickhouse-sql-select?) (clickhouse-emit-from (string-append "(" (clickhouse-emit-select ast) ")")))))
 
 (define (clickhouse-emit-where ast)
   (match ast
-    ((? string?)         (string-append "WHERE " ast))
-    ((? clickhouse-sql-function?)   (clickhouse-emit-where (clickhouse-emit-function ast)))
+    ((? string?) (string-append "WHERE " ast))
+    ((? clickhouse-sql-function?) (clickhouse-emit-where (clickhouse-emit-function ast)))
     ((? clickhouse-sql-expression?) (clickhouse-emit-where (clickhouse-emit-expression ast)))))
 
 (define (clickhouse-emit-cluster ast)
@@ -151,9 +151,9 @@
                     " (" (clickhouse-emit-columns columns) ") "
                     (clickhouse-emit-engine engine)
                     (if partition-by (string-append " " (clickhouse-emit-partition-by partition-by)) "")
-                    (if order-by     (string-append " " (clickhouse-emit-order-by order-by))         "")
-                    (if primary-key  (string-append " " (clickhouse-emit-primary-key primary-key))   "")
-                    (if sample-by    (string-append " " (clickhouse-emit-sample-by sample-by))       "")))))
+                    (if order-by (string-append " " (clickhouse-emit-order-by order-by)) "")
+                    (if primary-key (string-append " " (clickhouse-emit-primary-key primary-key)) "")
+                    (if sample-by (string-append " " (clickhouse-emit-sample-by sample-by)) "")))))
 
 (define (clickhouse-emit-insert-columns keys)
   (string-append "(" (clickhouse-emit-expressions keys) ")"))
@@ -166,7 +166,7 @@
    "VALUES "
    (string-join
     (match rows
-      ((? list?)   (map clickhouse-emit-insert-row rows))
+      ((? list?) (map clickhouse-emit-insert-row rows))
       ((? vector?) (map clickhouse-emit-insert-row (vector->list rows))))
     ", ")))
 
@@ -181,5 +181,5 @@
   (match ast
     ((clickhouse-sql-select expressions from where)
      (string-append "SELECT " (clickhouse-emit-expressions expressions)
-                    (if from  (string-append " " (clickhouse-emit-from from)) "")
+                    (if from (string-append " " (clickhouse-emit-from from)) "")
                     (if where (string-append " " (clickhouse-emit-where where)) "")))))
