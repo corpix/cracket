@@ -20,8 +20,9 @@
 (define (clickhouse-emit-value ast)
   (match ast
     ((? number?) (number->string ast))
-    ((? symbol?) (sql-escape (symbol->string ast))) ;; FIXME: I don't think we need to escape symbols, this is ill logic
-    ((? string?) (format "'~a'" (sql-escape ast)))))
+    ((? symbol?) (sql-escape (symbol->string ast)))
+    ((? string?) (format "'~a'" (sql-escape ast)))
+    ((? list?) (string-append "(" (string-join (map clickhouse-emit-value ast) ",") ")"))))
 
 (define (clickhouse-emit-parameter ast)
   (match ast

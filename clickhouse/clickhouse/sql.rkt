@@ -132,6 +132,9 @@
     (check-equal?
      (clickhouse-sql (insert #:into numbers #:rows (1 "hello") (2 "world") (3 "!")))
      "INSERT INTO numbers VALUES (1, 'hello'), (2, 'world'), (3, '!')")
+    (check-equal?
+     (clickhouse-sql (insert #:into numbers #:rows (1 "hello" (1 "hey"))))
+     "INSERT INTO numbers VALUES (1, 'hello', (1, 'hey'))")
     (let ((vec (list->vector '((1 "hello") (2 "world") (3 "!")))))
       (check-equal?
        (clickhouse-sql (insert #:into numbers #:rows ,vec))
