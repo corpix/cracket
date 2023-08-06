@@ -29,7 +29,12 @@
     Boolean Bool))
 
 (define-clickhouse-syntax-set clickhouse-complex-type
-  '(FixedString Array Tuple Enum8 Enum16 Nested Nullable Decimal))
+  '(FixedString
+    Array Tuple
+    Enum8 Enum16
+    Nested
+    Nullable
+    Decimal Decimal32 Decimal64 Decimal128 Decimal256))
 
 ;; engine kind
 
