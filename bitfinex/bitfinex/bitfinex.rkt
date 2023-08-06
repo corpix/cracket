@@ -210,7 +210,8 @@
    ask ask-period ask-size
    daily-change daily-change-percent
    last-price
-   volume high low)
+   volume high low
+   frr-amount-available)
   #:transparent)
 
 ;; For trading pair symbols (ex. tBTCUSD)
