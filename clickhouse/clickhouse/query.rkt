@@ -2,7 +2,7 @@
 (require corpix/http
          corpix/prometheus
          racket/contract
-         racket/generator
+         corpix/generator
          "connection.rkt"
          "convert.rkt"
          "sql.rkt"
@@ -17,7 +17,8 @@
          (contract-out
           (clickhouse-query-raw     (-> clickhouse-connection? (or/c string? clickhouse-sql-statement?) generator?))
           (clickhouse-query-convert (-> generator? procedure? list? generator?))
-          (clickhouse-query         (-> clickhouse-connection? (or/c string? clickhouse-sql-statement?) generator?))))
+          (clickhouse-query         (-> clickhouse-connection? (or/c string? clickhouse-sql-statement?) generator?))
+          (clickhouse-query!        (-> clickhouse-connection? (or/c string? clickhouse-sql-statement?) void?))))
 
 (define current-clickhouse-schema (make-parameter null))
 
@@ -87,6 +88,9 @@
   (clickhouse-query-convert (clickhouse-query-raw connection statement)
                             clickhouse-transition
                             (current-clickhouse-schema)))
+
+(define (clickhouse-query! connection statement)
+  (void (generator->list (clickhouse-query connection statement))))
 
 (define-syntax (clickhouse stx)
   (syntax-parse stx

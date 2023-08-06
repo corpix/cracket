@@ -1,8 +1,7 @@
 #lang racket
-(require "clickhouse.rkt")
+(require corpix/generator
+         "clickhouse.rkt")
 
-(define (generator->list generator)
-  (for/list ((v (in-producer generator (void)))) v))
 (parameterize ((current-clickhouse-connection (make-clickhouse-connection)))
   (void (generator->list (clickhouse "create table if not exists default.test (a UInt8, b UInt8) engine = Memory")))
   (define (flush vec)
