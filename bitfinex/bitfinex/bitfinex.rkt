@@ -6,7 +6,8 @@
          corpix/websocket
          corpix/prometheus
          (for-syntax corpix/syntax))
-(provide make-bitfinex-connection
+(provide current-bitfinex-connection
+         make-bitfinex-connection
          bitfinex-subscribe
          bitfinex-subscribe/trades
          bitfinex-subscribe/ticker
@@ -41,6 +42,8 @@
          (struct-out bitfinex-funding-trades-message))
 (module+ test
   (require rackunit))
+
+(define current-bitfinex-connection (make-parameter #f))
 
 ;; Bitfinex abbreviations:
 ;; bu             balance update
@@ -391,10 +394,9 @@
 
 ;;
 
-(define (bitfinex-subscribe/trades conn market-type pair)
+(define (bitfinex-subscribe/trades market-type pair #:connection (conn (current-bitfinex-connection)))
   (let ((constructor (bitfinex-entity-by-market-type market-type trades)))
     (bitfinex-subscribe
-     conn
      (make-bitfinex-request "subscribe"
                             'channel "trades"
                             'symbol (make-symbol market-type pair))
@@ -404,6 +406,7 @@
           (map (lambda (v) (apply constructor v))
                (cadr message)))
          (else (apply constructor (caddr message)))))
+     #:connection conn
      #:filter
      (lambda (message _)
        (define type (cadr message))
@@ -413,20 +416,19 @@
          ((eq? (string->symbol type) 'fte) #t)
          (else #f))))))
 
-(define (bitfinex-subscribe/ticker conn market-type pair)
+(define (bitfinex-subscribe/ticker market-type pair #:connection (conn (current-bitfinex-connection)))
   (let ((constructor (bitfinex-entity-by-market-type market-type ticker)))
     (bitfinex-subscribe
-     conn
      (make-bitfinex-request "subscribe"
                             'channel "ticker"
                             'symbol (make-symbol market-type pair))
      (lambda (message)
-       (apply constructor (cadr message))))))
+       (apply constructor (cadr message)))
+     #:connection conn)))
 
-(define (bitfinex-subscribe/book conn market-type pair)
+(define (bitfinex-subscribe/book market-type pair #:connection (conn (current-bitfinex-connection)))
   (let ((constructor (bitfinex-entity-by-market-type market-type book)))
     (bitfinex-subscribe
-     conn
      (make-bitfinex-request "subscribe"
                             'channel "book"
                             'symbol (make-symbol market-type pair))
@@ -435,7 +437,8 @@
          ((list? (caadr message))
           (map (lambda (v) (apply constructor v))
                (cadr message)))
-         (else (apply constructor (cadr message))))))))
+         (else (apply constructor (cadr message)))))
+     #:connection conn)))
 
 ;;
 
@@ -567,7 +570,8 @@
             (maybe-yield message result))
         (loop))))))
 
-(define (bitfinex-subscribe conn request transform
+(define (bitfinex-subscribe request transform
+                            #:connection  (conn (current-bitfinex-connection))
                             #:filter      (filter?     #f)
                             #:timeout     (timeout     10)
                             #:buffer-size (buffer-size 32))
@@ -601,7 +605,8 @@
            (prometheus-set! bitfinex-metric-subscriptions (length (hash-keys streams)))
            (values id (make-bitfinex-message-generator channel transform #:filter filter?)))))))))
 
-(define (bitfinex-unsubscribe conn id
+(define (bitfinex-unsubscribe id
+                              #:connection (conn (current-bitfinex-connection))
                               #:timeout (timeout 10))
   (let* ((transport (bitfinex-connection-transport conn))
          (subscriptions (bitfinex-connection-subscriptions conn))
@@ -804,10 +809,10 @@
                                  subscriptions
                                  (hash "chanId" 666))))
              ((id next)
-              (bitfinex-subscribe (-make-bitfinex-connection
-                                   (make-dummy-transport #:on-write write-handler)
-                                   subscriptions (void))
-                                  request (make-dummy-transform message)))
+              (bitfinex-subscribe request (make-dummy-transform message)
+                                  #:connection (-make-bitfinex-connection
+                                                (make-dummy-transport #:on-write write-handler)
+                                                subscriptions (void))))
              ((channel)
               (bitfinex-stream-channel (hash-ref (bitfinex-subscriptions-streams subscriptions) id))))
           (check-equal? id 666)
@@ -818,10 +823,10 @@
       (test-case "absence of subscription acknowledge should produce a timeout exception"
         (let ((subscriptions (make-subscriptions)))
           (check-exn exn:fail:user:bitfinex:timeout?
-                     (thunk (bitfinex-subscribe (-make-bitfinex-connection
-                                                 (make-dummy-transport #:on-write void) subscriptions (void))
-                                                (make-subscribe-request)
+                     (thunk (bitfinex-subscribe (make-subscribe-request)
                                                 (make-dummy-transform (void))
+                                                #:connection (-make-bitfinex-connection
+                                                              (make-dummy-transport #:on-write void) subscriptions (void))
                                                 #:timeout 1)))
           (test-case "should not create any stream"
             (check-true (hash-empty? (bitfinex-subscriptions-streams subscriptions))))))
@@ -829,41 +834,38 @@
       (test-case "exception passed into pending subscription channel should be raised"
         (let ((subscriptions (make-subscriptions)))
           (check-exn exn:test?
-                     (thunk (bitfinex-subscribe
-                             (-make-bitfinex-connection
-                              (make-dummy-transport
-                               #:on-write (thunk*
-                                           (async-channel-put (bitfinex-subscriptions-pending subscriptions)
-                                                              (exn:test "test" (current-continuation-marks)))))
-                              subscriptions (void))
-                             (make-subscribe-request)
-                             (make-dummy-transform (void)))))
+                     (thunk (bitfinex-subscribe (make-subscribe-request)
+                                                (make-dummy-transform (void))
+                                                #:connection (-make-bitfinex-connection
+                                                              (make-dummy-transport
+                                                               #:on-write (thunk*
+                                                                           (async-channel-put (bitfinex-subscriptions-pending subscriptions)
+                                                                                              (exn:test "test" (current-continuation-marks)))))
+                                                              subscriptions (void)))))
           (test-case "should not create any stream"
             (check-true (hash-empty? (bitfinex-subscriptions-streams subscriptions))))))
 
       (test-case "eof passed into pending subscription channel should produce an exception"
         (let ((subscriptions (make-subscriptions)))
           (check-exn exn:fail:user:bitfinex:closed?
-                     (thunk (bitfinex-subscribe
-                             (-make-bitfinex-connection
-                              (make-dummy-transport
-                               #:on-write
-                               (thunk* (async-channel-put (bitfinex-subscriptions-pending subscriptions) eof)))
-                              subscriptions (void))
-                             (make-subscribe-request)
-                             (make-dummy-transform (void)))))
+                     (thunk (bitfinex-subscribe (make-subscribe-request)
+                                                (make-dummy-transform (void))
+                                                #:connection (-make-bitfinex-connection
+                                                              (make-dummy-transport
+                                                               #:on-write
+                                                               (thunk* (async-channel-put (bitfinex-subscriptions-pending subscriptions) eof)))
+                                                              subscriptions (void)))))
           (test-case "should not create any stream"
             (check-true (hash-empty? (bitfinex-subscriptions-streams subscriptions))))))
 
       (test-case "exception raised in transport should be raised"
         (let ((subscriptions (make-subscriptions)))
           (check-exn exn:test?
-                     (thunk (bitfinex-subscribe
-                             (-make-bitfinex-connection
-                              (make-dummy-transport #:on-write (thunk* (raise (exn:test "test" (current-continuation-marks)))))
-                              subscriptions (void))
-                             (make-subscribe-request)
-                             (make-dummy-transform (void)))))
+                     (thunk (bitfinex-subscribe (make-subscribe-request)
+                                                (make-dummy-transform (void))
+                                                #:connection (-make-bitfinex-connection
+                                                              (make-dummy-transport #:on-write (thunk* (raise (exn:test "test" (current-continuation-marks)))))
+                                                              subscriptions (void)))))
           (test-case "should not create any stream"
             (check-true (hash-empty? (bitfinex-subscriptions-streams subscriptions)))))))))
 
@@ -922,7 +924,7 @@
              (send transport close)
              (when-eof transport)))))))
 
-(define (bitfinex-close connection)
+(define (bitfinex-close (connection (current-bitfinex-connection)))
   (send (bitfinex-connection-transport connection) close))
 
 (module+ test
