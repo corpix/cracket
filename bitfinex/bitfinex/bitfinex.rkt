@@ -166,13 +166,44 @@
 (define-struct bitfinex-subscriptions
   (streams pending semaphore))
 
+;; Response Fields (trading pairs, ex. tBTCUSD)
+;; Index Field                 Type   Description
+;; [0]   BID                   float  Price of last highest bid
+;; [1]   BID_SIZE              float  Sum of the 25 highest bid sizes
+;; [2]   ASK                   float  Price of last lowest ask
+;; [3]   ASK_SIZE              float  Sum of the 25 lowest ask sizes
+;; [4]   DAILY_CHANGE          float  Amount that the last price has changed since yesterday
+;; [5]   DAILY_CHANGE_RELATIVE float  Relative price change since yesterday (*100 for percentage change)
+;; [6]   LAST_PRICE            float  Price of the last trade
+;; [7]   VOLUME                float  Daily volume
+;; [8]   HIGH                  float  Daily high
+;; [9]   LOW                   float  Daily low
 (define-struct bitfinex-trading-ticker-message
-  (bid bid-size
-       ask ask-size
-       daily-change daily-change-percent
-       last-price
-       volume high low)
+  (
+   bid bid-size
+   ask ask-size
+   daily-change daily-change-percent
+   last-price
+   volume high low)
   #:transparent)
+
+;; Response Fields (funding currencies, ex. fUSD)
+;; Index  Field                Type    Description
+;; [0]    FRR                  float   Flash Return Rate - average of all fixed rate funding over the last hour
+;; [1]    BID                  float   Price of last highest bid
+;; [2]    BID_PERIOD           int     Bid period covered in days
+;; [3]    BID_SIZE             float   Sum of the 25 highest bid sizes
+;; [4]    ASK                  float   Price of last lowest ask
+;; [5]    ASK_PERIOD           int     Ask period covered in days
+;; [6]    ASK_SIZE             float   Sum of the 25 lowest ask sizes
+;; [7]    DAILY_CHANGE         float   Amount that the last price has changed since yesterday
+;; [8]    DAILY_CHANGE_PERC    float   Relative price change since yesterday (*100 for percentage change)
+;; [9]    LAST_PRICE           float   Price of the last trade
+;; [10]   VOLUME               float   Daily volume
+;; [11]   HIGH                 float   Daily high
+;; [12]   LOW                  float   Daily low
+;; [ . . . ]
+;; [15]   FRR_AMOUNT_AVAILABLE float   The amount of funding that is available at the Flash Return Rate
 (define-struct bitfinex-funding-ticker-message
   (frr
    bid bid-period bid-size
@@ -181,15 +212,43 @@
    last-price
    volume high low)
   #:transparent)
+
+;; For trading pair symbols (ex. tBTCUSD)
+;; Index  Field    Type    Description
+;; [0]    PRICE    float   Price level
+;; [1]    COUNT    int     Number of orders at that price level
+;; [2]    AMOUNT   float   Total amount available at that price level (if AMOUNT > 0 then bid else ask)
 (define-struct bitfinex-trading-book-message
   (price count amount)
   #:transparent)
+
+;; For funding currency symbols (ex. fUSD)
+;; Index  Field    Type    Description
+;; [0]    RATE     float   Rate level
+;; [1]    PERIOD   int     Period level
+;; [2]    COUNT    int     Number of orders at that price level
+;; [3]    AMOUNT   float   Total amount available at that price level (if AMOUNT > 0 then ask else bid)
 (define-struct bitfinex-funding-book-message
   (rate period count amount)
   #:transparent)
+
+;; For trading pair symbols (ex. tBTCUSD)
+;; Index  Field    Type     Description
+;; [0]    ID       int      ID of the trade
+;; [1]    MTS      int      Millisecond epoch timestamp
+;; [2]    AMOUNT   float    How much was bought (positive) or sold (negative)
+;; [3]    PRICE    float    Price at which the trade was executed
 (define-struct bitfinex-trading-trades-message
   (id timestamp amount price)
   #:transparent)
+
+;; For funding currency symbols (ex. fUSD)
+;; Index  Field    Type    Description
+;; [0]    ID       int     ID of the trade
+;; [1]    MTS      int     Millisecond epoch timestamp
+;; [2]    AMOUNT   float   How much was bought (positive) or sold (negative)
+;; [3]    RATE     float   Rate at which funding transaction occurred
+;; [4]    PERIOD   int     Amount of time the funding transaction was for
 (define-struct bitfinex-funding-trades-message
   (id timestamp amount rate period)
   #:transparent)
@@ -250,12 +309,12 @@
       (if (void? socket)
           eof
           (with-exn-handler eof
-            (websocket-receive socket #:payload-type 'binary))))
+            (websocket-receive socket #:payload-type websocket-payload-text))))
 
     (define/public (write payload)
       (when (not (void? socket))
         (with-exn-handler eof
-          (websocket-send socket payload #:payload-type 'binary))))))
+          (websocket-send socket payload #:payload-type websocket-payload-text))))))
 
 (define (make-bitfinex-websocket-transport)
   (new bitfinex-websocket%))
