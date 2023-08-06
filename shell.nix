@@ -37,6 +37,8 @@ in stdenv.mkDerivation rec {
 
     racket pkg-config
     websocat
+    sqlite
+    clickhouse
   ];
   shellHook = with pkgs; ''
     export root=$(pwd)
