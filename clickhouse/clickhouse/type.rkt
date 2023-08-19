@@ -12,6 +12,7 @@
 (define-struct clickhouse-sql-expression (name value) #:prefab)
 (define-struct clickhouse-sql-parameter (expr) #:prefab)
 (define-struct clickhouse-sql-number (expr) #:prefab)
+(define-struct clickhouse-sql-rows (values) #:prefab)
 
 (define-struct clickhouse-sql-statement (value) #:prefab)
 (define-struct clickhouse-sql-create-table

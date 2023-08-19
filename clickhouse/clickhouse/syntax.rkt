@@ -65,6 +65,12 @@
     (pattern (~seq columns:ClickhouseColumn ...) #:with ast (attribute columns.ast))
     (pattern v:ClickhouseUnquote #:with ast #'v))
 
+  (define-syntax-class ClickhouseRows
+    (pattern expr:ClickhouseUnquote
+             #:with ast #`(make-clickhouse-sql-rows #,(attribute expr.ast)))
+    (pattern (exprs:ClickhouseExpression ...)
+             #:with ast #`(make-clickhouse-sql-rows (list #,@(attribute exprs.ast)))))
+
   (define-syntax-class ClickhouseExpressionAnonymous
     (pattern expression:ClickhouseParameter
              #:with ast #`(make-clickhouse-sql-expression #f #,(attribute expression.ast)))
@@ -78,11 +84,6 @@
     (pattern (~seq expression:ClickhouseExpressionAnonymous #:as namexpression:ClickhouseParameter)
              #:with ast #`(make-clickhouse-sql-expression #,(attribute namexpression.ast)
                                                           #,(attribute expression.ast))))
-  (define-syntax-class ClickhouseExpressions
-    (pattern expr:ClickhouseUnquote
-             #:with ast #`(#,(attribute expr.ast)))
-    (pattern (exprs:ClickhouseExpression ...)
-             #:with ast (attribute exprs.ast)))
 
   (define-syntax-class ClickhouseFunction
     (pattern (id:id arguments:ClickhouseExpression ...)
@@ -137,11 +138,11 @@
     #:description "insert statement"
     (pattern (_ #:into name:ClickhouseParameter
                 (~optional (~seq #:columns columns:ClickhouseExpression ...))
-                (~seq #:rows rows:ClickhouseExpressions))
+                (~seq #:rows rows:ClickhouseRows))
              #:with ast #`(make-clickhouse-sql-insert
                            #,(attribute name.ast)
                            #,(if (attribute columns.ast) #`(list #,@(attribute columns.ast)) #'#f)
-                           (list #,@(attribute rows.ast)))))
+                           #,(attribute rows.ast))))
 
   (define-syntax-class ClickhouseSelect
     #:description "select statement"

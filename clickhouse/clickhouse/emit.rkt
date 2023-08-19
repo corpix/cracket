@@ -1,5 +1,6 @@
 #lang racket
-(require "constant.rkt"
+(require corpix/strings
+         "constant.rkt"
          "escape.rkt"
          "type.rkt")
 (provide (all-defined-out))
@@ -9,7 +10,8 @@
     ((? number?) (number->string ast))
     ((? symbol?) (sql-escape (symbol->string ast)))
     ((? string?) (format "'~a'" (sql-escape ast)))
-    ((? list?) (string-append "(" (string-join (map clickhouse-emit-value ast) ",") ")"))
+    ((? list?) (string-append "(" (string-join-sequence-with (in-list ast) clickhouse-emit-value ",") ")"))
+    ((? vector?) (string-append "(" (string-join-sequence-with (in-vector ast) clickhouse-emit-value ",") ")"))
     ((? boolean?) (if ast "true" "false"))
     ((? clickhouse-sql-mapping?) (clickhouse-emit-mapping ast))))
 
@@ -146,19 +148,16 @@
                     (if sample-by (string-append " " (clickhouse-emit-sample-by sample-by)) "")))))
 
 (define (clickhouse-emit-insert-rows rows)
-  (string-append
-   "VALUES "
-   (string-join
-    (match rows
-      ((? list?) (map clickhouse-emit-expressions rows)))
-    ",")))
+  (match rows
+    ((clickhouse-sql-rows row-seq)
+     (string-join-sequence-with row-seq clickhouse-emit-expression ","))))
 
 (define (clickhouse-emit-insert ast)
   (match ast
     ((clickhouse-sql-insert name columns rows)
      (string-append "INSERT INTO " (clickhouse-emit-parameter name)
                     " " (if columns (string-append (clickhouse-emit-expressions columns) " ") "")
-                    (clickhouse-emit-insert-rows rows)))))
+                    "VALUES " (clickhouse-emit-insert-rows rows)))))
 
 (define (clickhouse-emit-select ast)
   (match ast
