@@ -29,7 +29,16 @@
 
   (define-syntax-class ClickhouseType
     #:description "type"
-    (pattern (id:id (key:ClickhouseExpressionAnonymous value:ClickhouseExpression) ...)
+    (pattern (id:id expr:ClickhouseUnquote)
+             #:when (clickhouse-mapping-type? (syntax->datum #'id))
+             #:fail-when (and (not (clickhouse-complex-type? (syntax->datum #'id))) #'id)
+             "illegal complex type name"
+             #:with ast #`(make-clickhouse-sql-type
+                           'id
+                           (map (lambda (pair)
+                                  (make-clickhouse-sql-mapping (car pair) (cadr pair)))
+                                #,(attribute expr.ast))))
+    (pattern (id:id ((key:ClickhouseExpressionAnonymous value:ClickhouseExpression) ...))
              #:when (clickhouse-mapping-type? (syntax->datum #'id))
              #:fail-when (and (not (clickhouse-complex-type? (syntax->datum #'id))) #'id)
              "illegal complex type name"
@@ -217,21 +226,18 @@
      "CREATE TABLE numbers (t Tuple(UInt8,UInt32)) ENGINE = Memory")
 
     (check-equal?
-     (clickhouse-sql (create-table numbers #:columns (t (Enum8 ("foo" 1))) #:engine Memory))
+     (clickhouse-sql (create-table numbers #:columns (t (Enum8 (("foo" 1)))) #:engine Memory))
      "CREATE TABLE numbers (t Enum8('foo' = 1)) ENGINE = Memory")
     (check-equal?
-     (clickhouse-sql (create-table numbers #:columns (t (Enum8 ("foo" 1) ("bar" 2))) #:engine Memory))
+     (clickhouse-sql (create-table numbers #:columns (t (Enum8 (("foo" 1) ("bar" 2)))) #:engine Memory))
      "CREATE TABLE numbers (t Enum8('foo' = 1,'bar' = 2)) ENGINE = Memory")
     (check-equal?
-     (clickhouse-sql (create-table numbers #:columns (t (Enum16 ("foo" 1) ("bar" 2))) #:engine Memory))
+     (clickhouse-sql (create-table numbers #:columns (t (Enum16 (("foo" 1) ("bar" 2)))) #:engine Memory))
      "CREATE TABLE numbers (t Enum16('foo' = 1,'bar' = 2)) ENGINE = Memory")
-    ;; FIXME: (unquote splicing)
-    ;; (check-equal?
-    ;;  (let ((enum '(("foo" 1) ("bar" 2))))
-    ;;    (clickhouse-create-table numbers #:columns (t (Enum8 ,@enum)) #:engine Memory)
-    ;;    ;; (clickhouse-sql (create-table numbers #:columns (t (Enum8 ,@enum)) #:engine Memory))
-    ;;    )
-    ;;  "CREATE TABLE numbers (t Enum8('foo' = 1)) ENGINE = Memory")
+    (check-equal?
+     (let ((enum '(("foo" 1) ("bar" 2))))
+       (clickhouse-sql (create-table numbers #:columns (t (Enum8 ,enum)) #:engine Memory)))
+     "CREATE TABLE numbers (t Enum8('foo' = 1,'bar' = 2)) ENGINE = Memory")
 
     (check-equal?
      (clickhouse-sql (create-table numbers #:columns (t (Nested (x UInt8) (y (Array UInt32)))) #:engine Memory))
