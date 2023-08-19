@@ -36,6 +36,9 @@
     Nullable
     Decimal Decimal32 Decimal64 Decimal128 Decimal256))
 
+(define-clickhouse-syntax-set clickhouse-mapping-type
+  '(Enum8 Enum16))
+
 ;; engine kind
 
 (define-clickhouse-syntax-set clickhouse-primitive-engine

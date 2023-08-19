@@ -2,27 +2,16 @@
 (require "constant.rkt"
          "escape.rkt"
          "type.rkt")
-(provide clickhouse-emit-statement
-         clickhouse-emit-create-table
-         clickhouse-emit-insert
-         clickhouse-emit-select
-         ;;
-         clickhouse-emit-type
-         clickhouse-emit-function
-         clickhouse-emit-columns)
-
-(define (clickhouse-emit-statement ast)
-  (match (clickhouse-sql-statement-value ast)
-    ((? clickhouse-sql-create-table? ast) (clickhouse-emit-create-table ast))
-    ((? clickhouse-sql-insert? ast) (clickhouse-emit-insert ast))
-    ((? clickhouse-sql-select? ast) (clickhouse-emit-select ast))))
+(provide (all-defined-out))
 
 (define (clickhouse-emit-value ast)
   (match ast
     ((? number?) (number->string ast))
     ((? symbol?) (sql-escape (symbol->string ast)))
     ((? string?) (format "'~a'" (sql-escape ast)))
-    ((? list?) (string-append "(" (string-join (map clickhouse-emit-value ast) ",") ")"))))
+    ((? list?) (string-append "(" (string-join (map clickhouse-emit-value ast) ",") ")"))
+    ((? boolean?) (if ast "true" "false"))
+    ((? clickhouse-sql-mapping?) (clickhouse-emit-mapping ast))))
 
 (define (clickhouse-emit-parameter ast)
   (match ast
@@ -39,16 +28,18 @@
     ;; XXX: Nested is something special.
     ;; It receives a column definitions as clickhouse-sql-column.
     ((clickhouse-sql-type 'Nested arguments)
+     ;; FIXME: use tuple here?
      (format "Nested(~a)" (clickhouse-emit-columns arguments)))
     ((clickhouse-sql-type name arguments)
      (string-append
       (symbol->string name)
       (if (not (null? arguments))
+          ;; FIXME: use tuple here?
           (format "(~a)" (clickhouse-emit-types arguments))
           "")))))
 
 (define (clickhouse-emit-types ast)
-  (string-join (map clickhouse-emit-type ast) ", "))
+  (string-join (map clickhouse-emit-type ast) ","))
 
 (define (clickhouse-emit-tuple ast)
   (match ast
@@ -68,26 +59,8 @@
     ((clickhouse-sql-function name arguments)
      (if (clickhouse-infix-operator? name)
          (string-join (map clickhouse-emit-expression arguments) (format " ~a " name))
+         ;; FIXME: use tuple here?
          (format "~a(~a)" name (clickhouse-emit-expressions arguments))))))
-
-(define (clickhouse-emit-expression ast)
-  (match ast
-    ((? clickhouse-sql-function?) (clickhouse-emit-function ast))
-    ((? clickhouse-sql-parameter?) (clickhouse-emit-parameter ast))
-    ((? clickhouse-sql-tuple?) (clickhouse-emit-tuple ast))
-
-    ((clickhouse-sql-expression name value)
-     (string-append
-      (clickhouse-emit-expression value)
-      (if name
-          (string-append " AS " (clickhouse-emit-parameter name))
-          "")))
-    (_ (clickhouse-emit-value ast))))
-
-(define (clickhouse-emit-expressions xs)
-  (string-join (map clickhouse-emit-expression xs) ", "))
-
-;;
 
 (define (clickhouse-emit-column ast)
   (match ast
@@ -97,7 +70,7 @@
      (format "~a ~a" name (clickhouse-emit-type type)))))
 
 (define (clickhouse-emit-columns ast)
-  (string-join (map clickhouse-emit-column ast) ", "))
+  (string-join (map clickhouse-emit-column ast) ","))
 
 (define (clickhouse-emit-from ast)
   (match ast
@@ -122,9 +95,7 @@
      ((clickhouse-sql-engine name arguments)
       (string-append
        (symbol->string name)
-       (if arguments
-           (format "(~a)" (clickhouse-emit-expressions arguments))
-           ""))))))
+       (if arguments (format "(~a)" (clickhouse-emit-expressions arguments)) ""))))))
 
 (define (clickhouse-emit-partition-by ast)
   (string-append "PARTITION BY " (clickhouse-emit-expression ast)))
@@ -137,6 +108,25 @@
 
 (define (clickhouse-emit-sample-by ast)
   (string-append "SAMPLE BY " (clickhouse-emit-expression ast)))
+
+(define (clickhouse-emit-expression ast)
+  (match ast
+    ((? clickhouse-sql-function?) (clickhouse-emit-function ast))
+    ((? clickhouse-sql-parameter?) (clickhouse-emit-parameter ast))
+    ((? clickhouse-sql-tuple?) (clickhouse-emit-tuple ast))
+
+    ((clickhouse-sql-expression name value)
+     (string-append
+      (clickhouse-emit-expression value)
+      (if name
+          (string-append " AS " (clickhouse-emit-parameter name))
+          "")))
+    (_ (clickhouse-emit-value ast))))
+
+(define (clickhouse-emit-expressions xs)
+  (match xs
+    ((? list?) (string-join (map clickhouse-emit-expression xs) ","))
+    (_ (clickhouse-emit-expression xs))))
 
 (define (clickhouse-emit-create-table ast)
   (match ast
@@ -155,26 +145,19 @@
                     (if primary-key (string-append " " (clickhouse-emit-primary-key primary-key)) "")
                     (if sample-by (string-append " " (clickhouse-emit-sample-by sample-by)) "")))))
 
-(define (clickhouse-emit-insert-columns keys)
-  (string-append "(" (clickhouse-emit-expressions keys) ")"))
-
-(define (clickhouse-emit-insert-row row)
-  (format "(~a)" (clickhouse-emit-expressions row)))
-
 (define (clickhouse-emit-insert-rows rows)
   (string-append
    "VALUES "
    (string-join
     (match rows
-      ((? list?) (map clickhouse-emit-insert-row rows))
-      ((? vector?) (map clickhouse-emit-insert-row (vector->list rows))))
-    ", ")))
+      ((? list?) (map clickhouse-emit-expressions rows)))
+    ",")))
 
 (define (clickhouse-emit-insert ast)
   (match ast
     ((clickhouse-sql-insert name columns rows)
      (string-append "INSERT INTO " (clickhouse-emit-parameter name)
-                    " " (if columns (string-append (clickhouse-emit-insert-columns columns) " ") "")
+                    " " (if columns (string-append (clickhouse-emit-expressions columns) " ") "")
                     (clickhouse-emit-insert-rows rows)))))
 
 (define (clickhouse-emit-select ast)
@@ -183,3 +166,9 @@
      (string-append "SELECT " (clickhouse-emit-expressions expressions)
                     (if from (string-append " " (clickhouse-emit-from from)) "")
                     (if where (string-append " " (clickhouse-emit-where where)) "")))))
+
+(define (clickhouse-emit-statement ast)
+  (match (clickhouse-sql-statement-value ast)
+    ((? clickhouse-sql-create-table? ast) (clickhouse-emit-create-table ast))
+    ((? clickhouse-sql-insert? ast) (clickhouse-emit-insert ast))
+    ((? clickhouse-sql-select? ast) (clickhouse-emit-select ast))))

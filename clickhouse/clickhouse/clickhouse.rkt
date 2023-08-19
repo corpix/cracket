@@ -3,14 +3,16 @@
          "connection.rkt"
          "convert.rkt"
          "query.rkt"
-         "sql.rkt")
+         "syntax.rkt"
+         "emit.rkt")
 (provide clickhouse-metrics
          (all-from-out "convert.rkt"
                        "connection.rkt"
-                       "sql.rkt"
+                       "syntax.rkt"
                        "query.rkt"
                        "connection.rkt"
-                       "batch.rkt"))
+                       "batch.rkt"
+                       "emit.rkt"))
 
 (define clickhouse-metrics
   (list clickhouse-metric-query-time))

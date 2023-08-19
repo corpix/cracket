@@ -5,8 +5,9 @@
          corpix/generator
          "connection.rkt"
          "convert.rkt"
-         "sql.rkt"
+         "syntax.rkt"
          "type.rkt"
+         "emit.rkt"
          (for-syntax racket/base
                      corpix/syntax
                      "syntax.rkt"))
@@ -40,7 +41,7 @@
   (let* ((start-time (current-milliseconds))
          (sql (match statement
                 ((? string?) statement)
-                ((? clickhouse-sql-statement?) (clickhouse-sql-statement->string statement))))
+                ((? clickhouse-sql-statement?) (clickhouse-emit-statement statement))))
          (response (query-send! connection sql))
          (status (http-response-status response))
          (in (http-response-body-reader response)))
