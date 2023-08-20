@@ -2,6 +2,7 @@
 (require racket/generic
          net/base64
          corpix/http
+         (for-syntax corpix/syntax)
          ;; FIXME: don't want a dependency from web-server, need to figure this out (implement server in corpix/http?)
          web-server/private/connection-manager
          web-server/private/timer
@@ -401,7 +402,8 @@
           (match (websocket-next-frame connection)
             ((? eof-object?) eof)
             ((websocket-protocol-frame final? opcode payload)
-             (unless (equal? opcode expected-opcode)
+             (unless (or (equal? opcode expected-opcode)
+                         (equal? opcode websocket-frame-continuation))
                (raise (exn:fail:user:websocket:unexpected-opcode
                        (format "unexpected opcode ~v, expected ~v for ~v payload type"
                                opcode expected-opcode payload-type)
@@ -561,19 +563,33 @@
                                    #:on-close (on-close websocket-close))
   (let ((message #f)
         (message-position 0))
-    (define (do-read buf)
+    (define (maybe-consume!)
       (unless message
         (set! message (websocket-receive connection #:payload-type payload-type))
-        (set! message-position 0))
+        (set! message-position 0)))
+    (define (do-read buf)
+      (maybe-consume!)
       (if (eof-object? message) eof
           (let ((limit (min (- (bytes-length message) message-position)
                             (bytes-length buf))))
             (begin0 limit
-              (bytes-copy! buf 0 message message-position limit)
+              (bytes-copy! buf 0 message message-position (+ message-position limit))
               (set! message-position (+ message-position limit))
               (when (= (bytes-length message) message-position)
                 (set! message #f))))))
-    (make-input-port (object-name (websocket-connection--in connection)) do-read #f
+    (define (do-peek buf amount-skip progress-evt)
+      (or (and progress-evt (sync/timeout 0 progress-evt))
+          (begin
+            (maybe-consume!)
+            (let* ((peek-position (+ message-position amount-skip)))
+              (flush-output (current-error-port))
+              (cond ((eof-object? message) eof)
+                    ((> peek-position (bytes-length message)) eof)
+                    (else (let ((limit (min (- (bytes-length message) peek-position)
+                                            (bytes-length buf))))
+                            (begin0 limit
+                              (bytes-copy! buf 0 message peek-position (+ peek-position limit))))))))))
+    (make-input-port (object-name (websocket-connection--in connection)) do-read do-peek
                      (thunk (on-close connection)))))
 
 (define (make-websocket-output-port connection
