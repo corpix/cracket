@@ -307,21 +307,21 @@ This method returns OK for success.")
 
 ;;
 
-(current-websocket-idle-timeout (* 60 60 24))
-(define client (jsonrpc-websocket-client "ws://127.0.0.1:6800/jsonrpc"))
-(with-jsonrpc client
-  (aria-add-uri (make-aria-secret "secret")
-                (list "magnet:?xt=urn:btih:dd8255ecdc7ca55fb0bbf81323d87062db1f6d1c&dn=Big+Buck+Bunny&tr=udp%3A%2F%2Fexplodie.org%3A6969")))
-
+;; (current-websocket-idle-timeout (* 60 60 24))
+;; (define client (jsonrpc-websocket-client "ws://127.0.0.1:6800/jsonrpc"))
 ;; (with-jsonrpc client
-;;   (aria-tell-status (make-aria-secret "secret")
-;;                     "f87dbb53b42ac06d"))
+;;   (aria-add-uri (make-aria-secret "secret")
+;;                 (list "magnet:?xt=urn:btih:dd8255ecdc7ca55fb0bbf81323d87062db1f6d1c&dn=Big+Buck+Bunny&tr=udp%3A%2F%2Fexplodie.org%3A6969")))
 
-;;(close-jsonrpc-client client)
+;; ;; (with-jsonrpc client
+;; ;;   (aria-tell-status (make-aria-secret "secret")
+;; ;;                     "f87dbb53b42ac06d"))
 
-(with-jsonrpc client (aria-get-session-info (make-aria-secret "secret")))
-(with-jsonrpc client (aria-get-global-stat (make-aria-secret "secret")))
-(with-jsonrpc client (aria-get-files (make-aria-secret "secret") "0fde0ef81d620ec4"))
-(with-jsonrpc client (aria-get-peers (make-aria-secret "secret") "0fde0ef81d620ec4"))
-(with-jsonrpc client (aria-get-servers (make-aria-secret "secret") "0fde0ef81d620ec4"))
-(with-jsonrpc client (aria-tell-active (make-aria-secret "secret")))
+;; ;;(close-jsonrpc-client client)
+
+;; (with-jsonrpc client (aria-get-session-info (make-aria-secret "secret")))
+;; (with-jsonrpc client (aria-get-global-stat (make-aria-secret "secret")))
+;; (with-jsonrpc client (aria-get-files (make-aria-secret "secret") "0fde0ef81d620ec4"))
+;; (with-jsonrpc client (aria-get-peers (make-aria-secret "secret") "0fde0ef81d620ec4"))
+;; (with-jsonrpc client (aria-get-servers (make-aria-secret "secret") "0fde0ef81d620ec4"))
+;; (with-jsonrpc client (aria-tell-active (make-aria-secret "secret")))
