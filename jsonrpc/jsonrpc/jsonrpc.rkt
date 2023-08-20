@@ -6,12 +6,15 @@
          corpix/websocket
          (for-syntax corpix/syntax))
 (provide define-jsonrpc
+         current-jsonrpc-mode
          current-jsonrpc-input-port
          current-jsonrpc-output-port
          current-jsonrpc-id-generator
          current-jsonrpc-method-registry
          current-jsonrpc-request-registry
          use-jsonrpc-reflection
+         make-jsonrpc-method-registry
+         make-jsonrpc-request-registry
          (except-out (struct-out jsonrpc-server) -make-jsonrpc-server)
          (except-out (struct-out jsonrpc-client) -make-jsonrpc-client)
          close-jsonrpc-server
@@ -68,6 +71,11 @@
 (define (close-jsonrpc-client client)
   ((jsonrpc-client-closer client)))
 
+;;
+
+(define (make-jsonrpc-method-registry)
+  (make-hash))
+
 (define (make-jsonrpc-request-registry)
   (-make-jsonrpc-request-registry (make-hash)
                                   (make-semaphore 1)))
@@ -75,10 +83,11 @@
 ;;
 
 (define jsonrpc-version "2.0")
+(define current-jsonrpc-mode (make-parameter 'strict)) ;; or 'loose
 (define current-jsonrpc-input-port (make-required-parameter #f "no input jsonrpc port is active"))
 (define current-jsonrpc-output-port (make-required-parameter #f "no output jsonrpc port is active"))
 (define current-jsonrpc-id-generator (make-parameter (make-jsonrpc-id-counter)))
-(define current-jsonrpc-method-registry (make-parameter (make-hash)))
+(define current-jsonrpc-method-registry (make-parameter (make-jsonrpc-method-registry)))
 (define current-jsonrpc-request-registry (make-parameter (make-jsonrpc-request-registry)))
 (define use-jsonrpc-reflection (make-parameter #f))
 
@@ -96,13 +105,16 @@
         (define-jsonrpc-from client)))))
 
 (define (write-jsonrpc-message id payload (port (current-jsonrpc-output-port)))
-  (write-bytes
-   ;; NOTE: writing as a single message
-   ;; this will help ports like websocket port
-   ;; to work correctly (websocket port wrap each write into separate frame)
-   ;; TODO: try to rewrite websocket output port to support buffering and write frame when port flushes
-   (json->bytes (make-hasheq `((jsonrpc . ,jsonrpc-version) (id . ,id) ,@payload)))
-   port)
+  (let ((rpc-payload `((id . ,id) ,@payload)))
+    (write-bytes
+     ;; NOTE: writing as a single message
+     ;; this will help ports like websocket port
+     ;; to work correctly (websocket port wrap each write into separate frame)
+     ;; TODO: try to rewrite websocket output port to support buffering and write frame when port flushes
+     (json->bytes (make-hasheq (if (eq? (current-jsonrpc-mode) 'strict)
+                                   (cons `(jsonrpc . ,jsonrpc-version) rpc-payload)
+                                   rpc-payload)))
+     port))
   (flush-output port))
 
 (define (write-jsonrpc-request method (port (current-jsonrpc-output-port))
@@ -139,11 +151,12 @@
   (let* ((message (read-json port)))
     (if (eof-object? message) eof
         (begin0 message
-          (let ((message-version (hash-ref message "jsonrpc" #f)))
-            (unless message-version
-              (error (format "jsonrpc version is not specified in incoming message: ~a" message)))
-            (unless (equal? message-version jsonrpc-version)
-              (error (format "jsonrpc version mismatch: expected ~s, got ~s" jsonrpc-version message-version))))))))
+          (when (eq? (current-jsonrpc-mode) 'strict)
+            (let ((message-version (hash-ref message "jsonrpc" #f)))
+              (unless message-version
+                (error (format "jsonrpc version is not specified in incoming message: ~a" message)))
+              (unless (equal? message-version jsonrpc-version)
+                (error (format "jsonrpc version mismatch: expected ~s, got ~s" jsonrpc-version message-version)))))))))
 
 (define (read-jsonrpc-request (port (current-jsonrpc-input-port)))
   (let* ((message (read-jsonrpc-message port)))
@@ -154,12 +167,7 @@
 
 (define (read-jsonrpc-response (port (current-jsonrpc-input-port)))
   (let* ((message (read-jsonrpc-message port)))
-    (if (eof-object? message) eof
-        (begin0 message
-          (unless (or (hash-has-key? message "result")
-                      (hash-has-key? message "error"))
-            (unless (hash-has-key? message "method")
-              (error (format "jsonrpc method is not specified: ~a" message))))))))
+    (if (eof-object? message) eof message)))
 
 (module+ test
   (test-case "write-jsonrpc-request"
@@ -210,6 +218,7 @@
     ((_ (name rest ...)
         (~optional (~seq #:method method) #:defaults ((method #'#f)))
         (~optional (~seq #:doc doc) #:defaults ((doc #'#f)))
+        (~optional (~seq #:registry registry) #:defaults ((registry #'(current-jsonrpc-method-registry))))
         body ...)
      (with-syntax* ((method-name (or (syntax->datum #'method)
                                      (syntax->datum #'name)))
@@ -241,8 +250,7 @@
                                          (else #'(body ...)))))
        #'(begin
            (define (name rest ...) method-body ...)
-           (hash-set! (current-jsonrpc-method-registry)
-                      (symbol->string 'method-name)
+           (hash-set! registry (symbol->string 'method-name)
                       (make-jsonrpc-method 'method-name 'signature doc name)))))))
 
 (define (jsonrpc-apply method params)
@@ -283,7 +291,9 @@
                        ((not (eq? err default))
                         (make-exn:fail (string-append
                                         "Remote error: "
-                                        (hash-ref err "message")
+                                        (format "(~a) " (hash-ref err "code" #f))
+                                        (hash-ref err "message" (or (hash-ref err "msg" #f)
+                                                                    (format "~a" err)))
                                         (let ((data (hash-ref err "data" #f)))
                                           (if data
                                               (format "\nRemote context:\n~a"
@@ -417,16 +427,16 @@
 
 (define (jsonrpc-websocket-serve host port #:dispatcher (dispatcher dispatch-jsonrpc-requests))
   (let* ((handler (lambda (connection state)
-                    (let-values (((in out) (values (websocket-connection-in connection)
-                                                   (websocket-connection-out connection))))
+                    (let-values (((in out) (values (make-websocket-input-port connection)
+                                                   (make-websocket-output-port connection))))
                       (dispatcher in out))))
          (closer (websocket-serve #:listen-ip host #:port port handler)))
     (make-jsonrpc-server closer)))
 
 (define (jsonrpc-websocket-client url #:dispatcher (dispatcher dispatch-jsonrpc-responses))
   (let*-values (((connection) (websocket-connect url))
-                ((in out) (values (websocket-connection-in connection)
-                                  (websocket-connection-out connection)))
+                ((in out) (values (make-websocket-input-port connection)
+                                  (make-websocket-output-port connection)))
                 ((conn-dispatcher-thread) (thread (thunk (dispatcher in)))))
     (make-jsonrpc-client in out (thunk (websocket-close connection)
                                        (kill-thread conn-dispatcher-thread)))))
