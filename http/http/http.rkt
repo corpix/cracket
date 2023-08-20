@@ -75,12 +75,6 @@
          http-decode-status-line
 
          http
-         ;; http-get
-         ;; http-head
-         ;; http-post
-         ;; http-put
-         ;; http-delete
-         ;; http-options
          with-request)
 (module+ test
   (require rackunit))
@@ -1250,12 +1244,3 @@
                    void
                    (thunk body ...)
                    (thunk (close-input-port (http-response-body-reader response-sym)))))))))))
-
-;; (http "https://corpix.dev")
-
-;; (define (http-get))
-;; (define (http-head))
-;; (define (http-post))
-;; (define (http-put))
-;; (define (http-delete))
-;; (define (http-options))
