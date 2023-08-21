@@ -12,7 +12,12 @@
          current-jsonrpc-id-generator
          current-jsonrpc-method-registry
          current-jsonrpc-request-registry
+         current-jsonrpc-read-interceptor
+         current-jsonrpc-write-interceptor
+         current-jsonrpc-message-field-map
          use-jsonrpc-reflection
+         jsonrpc-ref
+         jsonrpc-set
          make-jsonrpc-method-registry
          make-jsonrpc-request-registry
          (except-out (struct-out jsonrpc-server) -make-jsonrpc-server)
@@ -89,6 +94,18 @@
 (define current-jsonrpc-id-generator (make-parameter (make-jsonrpc-id-counter)))
 (define current-jsonrpc-method-registry (make-parameter (make-jsonrpc-method-registry)))
 (define current-jsonrpc-request-registry (make-parameter (make-jsonrpc-request-registry)))
+(define current-jsonrpc-read-interceptor (make-parameter #f))
+(define current-jsonrpc-write-interceptor (make-parameter #f))
+(define current-jsonrpc-message-field-map
+  (make-parameter #hasheq((rpc . "jsonrpc")
+                          (id . "id")
+                          (method . "method")
+                          (parameters . "params")
+                          (result . "result")
+                          (error . "error")
+                          (error-code . "code")
+                          (error-message . "message")
+                          (error-data . "data"))))
 (define use-jsonrpc-reflection (make-parameter #f))
 
 ;;
@@ -104,6 +121,17 @@
       (when (use-jsonrpc-reflection)
         (define-jsonrpc-from client)))))
 
+(define (intercept-jsonrpc-message interceptor message)
+  (if interceptor (interceptor message) message))
+
+(define (jsonrpc-ref record field (default #f))
+  (hash-ref record (hash-ref (current-jsonrpc-message-field-map) field field)
+            default))
+
+(define (jsonrpc-set record field value)
+  (hash-set record (hash-ref (current-jsonrpc-message-field-map) field field)
+            value))
+
 (define (write-jsonrpc-message id payload (port (current-jsonrpc-output-port)))
   (let ((rpc-payload `((id . ,id) ,@payload)))
     (write-bytes
@@ -111,9 +139,11 @@
      ;; this will help ports like websocket port
      ;; to work correctly (websocket port wrap each write into separate frame)
      ;; TODO: try to rewrite websocket output port to support buffering and write frame when port flushes
-     (json->bytes (make-hasheq (if (eq? (current-jsonrpc-mode) 'strict)
-                                   (cons `(jsonrpc . ,jsonrpc-version) rpc-payload)
-                                   rpc-payload)))
+     (intercept-jsonrpc-message
+      (current-jsonrpc-write-interceptor)
+      (json->bytes (make-hasheq (if (eq? (current-jsonrpc-mode) 'strict)
+                                    (cons `(jsonrpc . ,jsonrpc-version) rpc-payload)
+                                    rpc-payload))))
      port))
   (flush-output port))
 
@@ -148,11 +178,12 @@
     (write-jsonrpc-message id payload port)))
 
 (define (read-jsonrpc-message (port (current-jsonrpc-input-port)))
-  (let* ((message (read-json port)))
+  (let* ((message (intercept-jsonrpc-message (current-jsonrpc-read-interceptor)
+                                             (read-json port))))
     (if (eof-object? message) eof
         (begin0 message
           (when (eq? (current-jsonrpc-mode) 'strict)
-            (let ((message-version (hash-ref message "jsonrpc" #f)))
+            (let ((message-version (jsonrpc-ref message 'rpc)))
               (unless message-version
                 (error (format "jsonrpc version is not specified in incoming message: ~a" message)))
               (unless (equal? message-version jsonrpc-version)
@@ -266,35 +297,36 @@
         (apply proc params))))
 
 (define (dispatch-jsonrpc-request message #:method-registry (methods (current-jsonrpc-method-registry)))
-  (let* ((method (hash-ref message "method"))
+  (let* ((method (or (jsonrpc-ref message 'method)
+                     (error "method is not specified")))
          (method-name (if (symbol? method) (symbol->string method) method))
          (method-descriptor (hash-ref methods method-name #f))
-         (params (hash-ref message "params" null)))
+         (params (jsonrpc-ref message 'parameters null)))
     (unless method-descriptor
       (error (format "method ~s is not defined" method-name)))
     (jsonrpc-apply method-descriptor params)))
 
 (define (dispatch-jsonrpc-response message #:request-registry (registry (current-jsonrpc-request-registry)))
-  (if (hash-ref message "method" #f)
+  (if (jsonrpc-ref message 'method #f)
       ;; NOTE: it is a callback
       (dispatch-jsonrpc-request message)
       ;; NOTE: it is a "usual" response
-      (let* ((id (hash-ref message "id"))
+      (let* ((id (jsonrpc-ref message 'id))
              (chan (call-with-semaphore
                     (jsonrpc-request-registry-sem registry)
                     (thunk (hash-ref (jsonrpc-request-registry-channels registry) id #f))))
-             (default (gensym)))
-        (let* ((result (hash-ref message "result" default))
-               (err (hash-ref message "error" default))
+             (default 'default))
+        (let* ((result (jsonrpc-ref message 'result default))
+               (err (jsonrpc-ref message 'error default))
                (resp (cond
                        ((not (eq? result default)) result)
                        ((not (eq? err default))
                         (make-exn:fail (string-append
                                         "Remote error: "
-                                        (format "(~a) " (hash-ref err "code" #f))
-                                        (hash-ref err "message" (or (hash-ref err "msg" #f)
-                                                                    (format "~a" err)))
-                                        (let ((data (hash-ref err "data" #f)))
+                                        (format "(~a) " (jsonrpc-ref err 'error-code #f))
+                                        (or (jsonrpc-ref err 'error-message #f)
+                                            (format "~a" err))
+                                        (let ((data (jsonrpc-ref err 'error-data #f)))
                                           (if data
                                               (format "\nRemote context:\n~a"
                                                       (string-join
@@ -368,7 +400,8 @@
   (let loop ()
     (let ((request (read-jsonrpc-request in)))
       (if (eof-object? request) eof
-          (let ((id (hash-ref request "id"))
+          (let ((id (or (jsonrpc-ref request 'id)
+                        (error "request id is not specified")))
                 ;; TODO: bounded worker pool to dispatch requests concurrently
                 (result (with-handlers ((exn? identity))
                           (dispatch-jsonrpc-request request))))
