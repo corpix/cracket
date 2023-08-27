@@ -1,5 +1,6 @@
 #lang racket
-(require web-server/servlet
+(require racket/cmdline
+         web-server/servlet
          web-server/http
          web-server/http/response
          web-server/servlet-dispatch
@@ -20,12 +21,14 @@
          racket/string
          racket/function
          corpix/os
+         corpix/list
          corpix/db
          corpix/css
          corpix/strings
          corpix/struct
          corpix/path
          corpix/websocket
+         corpix/configuration
          (for-syntax corpix/syntax)
          "../http/http/http-router.rkt"
          "../http/http/http-status.rkt")
@@ -33,6 +36,79 @@
 (define task-states '(pending running exited errored killed))
 (define task-states-hash (for/hash ((state (in-list task-states)) (index (in-naturals))) (values state index)))
 (define task-states-running '(pending running))
+
+(define-configurable current-testbed-http-address "127.0.0.1")
+(define-configurable current-testbed-http-port 9857)
+(define-configurable current-testbed-tasks
+  `(((name . "test")
+     (description . "sample test task")
+     (runner-type . eval)
+     (runner-script . ((begin (displayln "hello world")
+                              (displayln "this task evals scheme code")))))
+    ((name . "test shell")
+     (description . "sample shell test task")
+     (runner-type . shell)
+     (runner-script . ("bash" ("-xec" "date; ls -la"))))
+    ((name . "test shell always fail")
+     (description . "sample shell test task which always fails")
+     (runner-type . shell)
+     (runner-script . ("bash" ("-xec" "sleep 3; exit 1"))))
+    ((name . "shell sleep")
+     (description . "sample shell test task which sleeps")
+     (runner-type . shell)
+     (runner-script . ("bash" ("-xec" "sleep 999996667"))))
+    ((name . "isolated shell")
+     (description . "sample shell test task which is isolated")
+     (runner-type . isolated-shell)
+     (runner-script . ((
+                        "--ro-bind" "/" "/"
+                        "--dev-bind" "/dev" "/dev"
+                        "--tmpfs" "/home"
+                        "--tmpfs" "/tmp"
+                        "--proc" "/proc"
+                        "--setenv" "HOME" "/home"
+                        "--die-with-parent")
+                       "bash"
+                       ("-xec" "ls -la ~/ /tmp"))))
+    ((name . "test-always-fails")
+     (description . "sample failing test task")
+     (runner-type . eval)
+     (runner-script . ((begin (error "oops")))))
+    ((name . "test-long-task")
+     (description . "sample test task which takes time to execute")
+     (runner-type . eval)
+     (runner-script ((begin (sleep 99999999)))))
+    ((name . "xvfb chromium")
+     (description . "sample chromium task")
+     (runner-type . isolated-shell)
+     (runner-script . (("--die-with-parent"
+                        "--ro-bind" "/" "/"
+                        "--dev-bind" "/dev" "/dev"
+                        "--tmpfs" "/home"
+                        "--tmpfs" "/tmp"
+                        "--tmpfs" ,(format "/run/user/~a" (getuid))
+                        "--proc" "/proc")
+                       "nix-shell"
+                       ("--pure"
+                        "--keep" "vnc_address"
+                        "--keep" "vnc_port"
+                        "-p" "xvfb-run"
+                        "-p" "x11vnc"
+                        "-p" "chromium"
+                        "--run"
+                        ,(let* ((resolution '(1280 . 1024)))
+                           (string-join
+                            `(,(format "xvfb-run -n $vnc_port --server-args '-screen 0 ~ax~ax24'"
+                                       (car resolution)
+                                       (cdr resolution))
+                              "bash -xec '"
+                              "x11vnc -bg -forever -nopw -quiet -listen $vnc_address -rfbport $vnc_port -xkb &"
+                              ,(format "chromium --no-sandbox --window-size=~a,~a --disable-infobars;"
+                                       (cdr resolution)
+                                       (car resolution))
+                              "wait'")
+                            " ")))))
+     (resources . (((type . vnc)))))))
 
 (define current-db (make-parameter #f))
 (define current-runners (make-parameter (make-hash)))
@@ -789,118 +865,45 @@
 
 ;;
 
-(when (file-exists? "testbed.db")
-  (delete-file "testbed.db"))
-(current-db (sqlite3-connect
-             #:database "testbed.db"
-             #:mode 'create))
+(define (preflight)
+  ;; (when (file-exists? "testbed.db")
+  ;;   (delete-file "testbed.db"))
+  (current-db (sqlite3-connect
+               #:database "testbed.db"
+               #:mode 'create))
+  (unless (file-exists? "testbed.db")
+    (create-all! (current-db))
+    (for ((task (in-list (current-testbed-tasks))))
+      (task-create! (make-task #:name (assocv 'name task)
+                               #:description (assocv 'description task)
+                               #:runner-type (assocv 'runner-type task)
+                               #:runner-script (assocv 'runner-script task)
+                               #:created-at (now))
+                    #:resources (map (lambda (resource) (make-resource #:type (assocv 'type resource)))
+                                     (assocv 'resources task null)))))
+  ;; reset any current host task states to "error" before starting
+  (apply update! (current-db)
+         (let ((query (~> (from task-instance #:as t)
+                          (where (and (= t.host ,(gethostname))
+                                      (or (= t.state ,(hash-ref task-states-hash 'pending))
+                                          (= t.state ,(hash-ref task-states-hash 'running))))))))
+           (for/list ((task-instance (in-entities (current-db) query)))
+             (update-task-instance-state task-instance (thunk* 'error))))))
 
-(create-all! (current-db))
-
-;;
-
-(void
- (task-create! (make-task #:name "test"
-                          #:description "sample test task"
-                          #:runner-type 'eval
-                          #:runner-script
-                          '((begin (displayln "hello world")
-                                   (displayln "this task evals scheme code")))
-                          #:created-at (now)))
- (task-create! (make-task #:name "test shell"
-                          #:description "sample shell test task"
-                          #:runner-type 'shell
-                          #:runner-script
-                          '("bash" ("-xec" "date; ls -la"))
-                          #:created-at (now)))
- (task-create! (make-task #:name "test shell always fail"
-                          #:description "sample shell test task which always fails"
-                          #:runner-type 'shell
-                          #:runner-script
-                          '("bash" ("-xec" "sleep 3; exit 1"))
-                          #:created-at (now)))
- (task-create! (make-task #:name "shell sleep"
-                          #:description "sample shell test task which sleeps"
-                          #:runner-type 'shell
-                          #:runner-script
-                          '("bash" ("-xec" "sleep 999996667"))
-                          #:created-at (now)))
- (task-create! (make-task #:name "isolated shell"
-                          #:description "sample shell test task which is isolated"
-                          #:runner-type 'isolated-shell
-                          #:runner-script
-                          '((
-                             "--ro-bind" "/" "/"
-                             "--dev-bind" "/dev" "/dev"
-                             "--tmpfs" "/home"
-                             "--tmpfs" "/tmp"
-                             "--proc" "/proc"
-                             "--setenv" "HOME" "/home"
-                             "--die-with-parent")
-                            "bash"
-                            ("-xec" "ls -la ~/ /tmp"))
-                          #:created-at (now)))
- (task-create! (make-task #:name "test-always-fails"
-                          #:description "sample failing test task"
-                          #:runner-type 'eval
-                          #:runner-script
-                          '((begin (error "oops")))
-                          #:created-at (now)))
- (task-create! (make-task #:name "test-long-task"
-                          #:description "sample test task which takes time to execute"
-                          #:runner-type 'eval
-                          #:runner-script
-                          '((begin (sleep 99999999)))
-                          #:created-at (now)))
- (task-create! (make-task #:name "xvfb chromium"
-                          #:description "sample chromium task"
-                          #:runner-type 'isolated-shell
-                          #:runner-script
-                          `(("--die-with-parent"
-                             "--ro-bind" "/" "/"
-                             "--dev-bind" "/dev" "/dev"
-                             "--tmpfs" "/home"
-                             "--tmpfs" "/tmp"
-                             "--tmpfs" ,(format "/run/user/~a" (getuid))
-                             "--proc" "/proc")
-                            "nix-shell"
-                            ("--pure"
-                             "--keep" "vnc_address"
-                             "--keep" "vnc_port"
-                             "-p" "xvfb-run"
-                             "-p" "x11vnc"
-                             "-p" "chromium"
-                             "--run"
-                             ,(let* ((resolution '(1280 . 1024)))
-                                (string-join
-                                 `(,(format "xvfb-run -n $vnc_port --server-args '-screen 0 ~ax~ax24'"
-                                            (car resolution)
-                                            (cdr resolution))
-                                   "bash -xec '"
-                                   "x11vnc -bg -forever -nopw -quiet -listen $vnc_address -rfbport $vnc_port -xkb &"
-                                   ,(format "chromium --no-sandbox --window-size=~a,~a --disable-infobars;"
-                                            (cdr resolution)
-                                            (car resolution))
-                                   "wait'")
-                                 " "))))
-                          #:created-at (now))
-               #:resources (list (make-resource #:type 'vnc)))
-
- ;; reset any current host task states to "error" before starting
- (apply update! (current-db)
-        (let ((query (~> (from task-instance #:as t)
-                         (where (and (= t.host ,(gethostname))
-                                     (or (= t.state ,(hash-ref task-states-hash 'pending))
-                                         (= t.state ,(hash-ref task-states-hash 'running))))))))
-          (for/list ((task-instance (in-entities (current-db) query)))
-            (update-task-instance-state task-instance (thunk* 'error))))))
-
-(define stop
+(define (main)
   (serve
    #:dispatch (sequencer:make
                (filter:make #rx"^/favicon\\.ico$" (lambda (conn request) (response/empty)))
                (filter:make #rx"^/static/" static-dispatcher)
                resources-dispatcher
                (dispatch/servlet http-dispatch-route))
-   #:listen-ip "127.0.0.1"
-   #:port 8000))
+   #:listen-ip (current-testbed-http-address)
+   #:port (current-testbed-http-port)))
+
+(command-line #:program "testbed"
+              #:once-each
+              (("-c" "--config") path "Configuration file path"
+                                 (current-configuration-path (path->complete-path path))))
+(module+ main
+  (void (preflight)
+        (main)))
