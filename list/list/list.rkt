@@ -1,6 +1,7 @@
 #lang racket
 (provide values->list
-         enumerate)
+         enumerate
+         assocv)
 
 (define-syntax (values->list stx)
   (syntax-case stx ()
@@ -10,3 +11,7 @@
   (for/list ((value (in-list lst))
              (index (in-naturals)))
     (list value index)))
+
+(define (assocv key lst (default #f))
+  (let ((p (assoc key lst)))
+    (if p (cdr p) default)))
