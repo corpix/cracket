@@ -10,32 +10,10 @@
          corpix/time
          corpix/hex
          corpix/prometheus
+         corpix/configuration
          (for-syntax corpix/syntax))
 (module+ test
   (require rackunit))
-
-(define current-configuration (make-parameter #f))
-(define current-configuration-path (make-parameter (path->complete-path "config.rkt")))
-(define current-configurables (make-parameter (make-hasheq)))
-
-(define (config key (default #f))
-  (unless (current-configuration)
-    (current-configuration
-     (with-input-from-file (current-configuration-path)
-       (thunk (read)))))
-  (let ((value (assoc key (current-configuration))))
-    (if value (cdr value) default)))
-
-(define-syntax (define-configurable stx)
-  (syntax-parse stx
-    ((_ key default)
-     (syntax
-      (begin
-        (define key
-          (make-derived-parameter
-           (make-parameter default) values
-           (lambda (value) (or (config 'key) value))))
-        (hash-set! (current-configurables) 'key key))))))
 
 (define-configurable current-http-address "127.0.0.1")
 (define-configurable current-http-port 5634)
