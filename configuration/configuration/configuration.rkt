@@ -9,8 +9,10 @@
 (define (config key (default #f))
   (unless (current-configuration)
     (current-configuration
-     (with-input-from-file (current-configuration-path)
-       (thunk (read)))))
+     (if (file-exists? (current-configuration-path))
+         (with-input-from-file (current-configuration-path)
+           (thunk (read)))
+         null)))
   (let ((value (assoc key (current-configuration))))
     (if value (cdr value) default)))
 
