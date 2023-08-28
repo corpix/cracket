@@ -3,6 +3,7 @@
 (define collection "corpix")
 (define deps '("base"))
 (define build-deps '("rackunit-lib"
+                     "mime-type"
                      "gregor"
                      "threading"
                      "corpix-syntax"

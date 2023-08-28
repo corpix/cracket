@@ -1,8 +1,6 @@
 #lang racket
 (require racket/cmdline
-         web-server/servlet
          web-server/http
-         web-server/http/response
          web-server/servlet-dispatch
          web-server/web-server
          web-server/dispatchers/filesystem-map
@@ -868,9 +866,9 @@
   (current-db (sqlite3-connect
                #:database "testbed.db"
                #:mode 'create))
-  (unless (file-exists? "testbed.db")
-    (create-all! (current-db))
-    (for ((task (in-list (current-testbed-tasks))))
+  (create-all! (current-db))
+  (for ((task (in-list (current-testbed-tasks))))
+    (with-handlers ((exn? void))
       (task-create! (make-task #:name (assocv 'name task)
                                #:description (assocv 'description task)
                                #:runner-type (assocv 'runner-type task)
@@ -903,4 +901,5 @@
                                  (current-configuration-path (path->complete-path path))))
 (module+ main
   (void (preflight)
-        (main)))
+        (main)
+        (sync never-evt)))

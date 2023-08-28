@@ -1,0 +1,20 @@
+diff --git tzinfo/private/zoneinfo.rkt tzinfo/private/zoneinfo.rkt
+index f257efd..3ca2206 100644
+--- tzinfo/private/zoneinfo.rkt
++++ tzinfo/private/zoneinfo.rkt
+@@ -117,9 +117,12 @@
+      (zone tzid intervals offsets)]))
+ 
+ (define default-zoneinfo-search-path
+-  (list "/usr/share/zoneinfo"
+-        "/usr/share/lib/zoneinfo"
+-        "/etc/zoneinfo"))
++  (let ((tzdir (getenv "TZDIR")))
++    (append
++      (list "/usr/share/zoneinfo"
++            "/usr/share/lib/zoneinfo"
++            "/etc/zoneinfo")
++      (if tzdir (list tzdir) null))))
+ 
+ ;; The 'share option of define-runtime-path was added in version 7.5.0.7.
+ (define-runtime-path-list relocatable-tzdata-zoneinfo-path-list
