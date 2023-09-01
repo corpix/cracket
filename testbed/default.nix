@@ -597,7 +597,9 @@
     "corpix-os" = "${cracketSource}/os";
     "corpix-struct" = "${cracketSource}/struct";
     "corpix-bytes" = "${cracketSource}/bytes";
+    "corpix-time" = "${cracketSource}/time";
     "corpix-configuration" = "${cracketSource}/configuration";
+    "corpix-logging" = "${cracketSource}/logging";
     "corpix-syntax" = "${cracketSource}/syntax";
     "corpix-hex" = "${cracketSource}/hex";
     "corpix-css" = "${cracketSource}/css";

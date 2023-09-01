@@ -1,6 +1,5 @@
 #lang racket
-(require racket/cmdline
-         web-server/http
+(require web-server/http
          web-server/servlet-dispatch
          web-server/web-server
          web-server/dispatchers/filesystem-map
@@ -14,6 +13,7 @@
          net/mime-type
          gregor
          threading
+         racket/cmdline
          racket/pretty
          racket/system
          racket/match
@@ -26,6 +26,7 @@
          corpix/struct
          corpix/websocket
          corpix/configuration
+         corpix/logging
          (for-syntax corpix/syntax))
 
 (define task-states '(pending running exited errored killed))
@@ -385,8 +386,12 @@
                  (define-struct struct-name (fields ...)
                    #:constructor-name constructor-sym
                    #:transparent)
-                 (define (allocator-sym) allocator-expr)
-                 (define (deallocator-sym resource-instance-id) deallocator-expr)
+                 (define (allocator-sym)
+                   (log-info "allocating resource ~a" 'id)
+                   allocator-expr)
+                 (define (deallocator-sym resource-instance-id)
+                   (log-info "de-allocating resource instance ~a" resource-instance-id)
+                   deallocator-expr)
                  (define (environment-sym resource-instance-id) environment-expr)
                  (define (representor-sym resource-instance-id) representor-expr)
                  (void prelude-expr)
@@ -647,6 +652,7 @@
     (sync (runner-job-thread job))))
 
 (define (task-run! task)
+  (log-info "running task ~a" task)
   (let* ((task-instance (task-instance-create! task)))
     (task-instance-run! task-instance)))
 
@@ -883,9 +889,11 @@
                                       (or (= t.state ,(hash-ref task-states-hash 'pending))
                                           (= t.state ,(hash-ref task-states-hash 'running))))))))
            (for/list ((task-instance (in-entities (current-db) query)))
-             (update-task-instance-state task-instance (thunk* 'error))))))
+             (update-task-instance-state task-instance (thunk* 'error)))))
+    (log-info "preflight checks complete"))
 
 (define (main)
+  (log-info "running server at ~a:~a" (current-testbed-http-address) (current-testbed-http-port))
   (serve
    #:dispatch (sequencer:make
                (filter:make #rx"^/favicon\\.ico$" (lambda (conn request) (response/empty)))
@@ -900,6 +908,7 @@
               (("-c" "--config") path "Configuration file path"
                                  (current-configuration-path (path->complete-path path))))
 (module+ main
-  (void (preflight)
-        (main)
-        (sync never-evt)))
+  (parameterize ((current-logger (make-logging 'info 'testbed)))
+    (void (preflight)
+          (main)
+          (sync never-evt))))

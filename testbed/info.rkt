@@ -14,6 +14,7 @@
                      "corpix-strings"
                      "corpix-struct"
                      "corpix-websocket"
-                     "corpix-configuration"))
+                     "corpix-configuration"
+                     "corpix-logging"))
 (define version "0.0")
 (define pkg-authors '(corpix))

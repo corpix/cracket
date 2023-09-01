@@ -2,6 +2,7 @@
 (require racket/bytes)
 (provide bytes-index
          bytes-contains-any
+         number->bytes
          (all-from-out racket/bytes))
 
 (define (bytes-index vec octet (start 0) (end (bytes-length vec)))
@@ -23,6 +24,10 @@
                       (cons i octet)
                       (loop (+ n 1))))
                 #f)))))
+
+(define number->bytes
+  (compose1 string->bytes/utf-8
+            number->string))
 
 (module+ test
   (require rackunit)
