@@ -18,6 +18,7 @@
          racket/system
          racket/match
          racket/function
+         racket/runtime-path
          corpix/os
          corpix/list
          corpix/db
@@ -28,6 +29,8 @@
          corpix/configuration
          corpix/logging
          (for-syntax corpix/syntax))
+
+(define-runtime-path static-dir "./static")
 
 (define task-states '(pending running exited errored killed))
 (define task-states-hash (for/hash ((state (in-list task-states)) (index (in-naturals))) (values state index)))
@@ -226,7 +229,7 @@
     (string-join (map css-expr->css expr) "")))
 
 (define static-dispatcher
-  (let ((url->path/static (make-url->path "static")))
+  (let ((url->path/static (make-url->path static-dir)))
     (files:make #:url->path (lambda (u)
                               (url->path/static
                                (struct-copy url u [path (cdr (url-path u))])))
@@ -895,14 +898,27 @@
 
 (define (main)
   (log-info "running server at ~a:~a" (current-testbed-http-address) (current-testbed-http-port))
-  (serve
-   #:dispatch (sequencer:make
-               (filter:make #rx"^/favicon\\.ico$" (lambda (conn request) (response/empty)))
-               (filter:make #rx"^/static/" static-dispatcher)
-               resources-dispatcher
-               (dispatch/servlet http-dispatch-route))
-   #:listen-ip (current-testbed-http-address)
-   #:port (current-testbed-http-port)))
+  (let ((dispatch (sequencer:make
+                   (filter:make #rx"^/favicon\\.ico$" (lambda (conn request) (response/empty)))
+                   (filter:make #rx"^/static/" static-dispatcher)
+                   resources-dispatcher
+                   (dispatch/servlet http-dispatch-route))))
+    (serve
+     #:dispatch (lambda (conn request)
+                  (with-handlers ((exn:dispatcher? (lambda (exn) (raise exn)))
+                                  (exn? (lambda (exn)
+                                          (log-error "~a ~a ~a: ~a"
+                                                     (request-client-ip request)
+                                                     (request-method request)
+                                                     (url->string (request-uri request))
+                                                     (exn-message exn)))))
+                    (dispatch conn request)
+                    (log-info "~a ~a ~a"
+                              (request-client-ip request)
+                              (request-method request)
+                              (url->string (request-uri request)))))
+     #:listen-ip (current-testbed-http-address)
+     #:port (current-testbed-http-port))))
 
 (command-line #:program "testbed"
               #:once-each

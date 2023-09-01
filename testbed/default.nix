@@ -662,7 +662,8 @@ in stdenv.mkDerivation rec {
   installPhase = ''
     raco pkg install --binary --batch --auto --user ${name}
     mkdir -p $out/bin
-    raco exe -o $out/bin/testbed ${cracketSource}/testbed/testbed/testbed.rkt
+    cd ${cracketSource}/testbed/testbed
+    raco exe -o $out/bin/testbed testbed.rkt
     wrapProgram $out/bin/testbed \
                 --prefix PATH ":" ${makeBinPath path} \
                 --prefix LD_LIBRARY_PATH ":" ${makeLibraryPath libs} \
