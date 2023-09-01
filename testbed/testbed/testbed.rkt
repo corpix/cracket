@@ -35,6 +35,7 @@
 
 (define-configurable current-testbed-http-address "127.0.0.1")
 (define-configurable current-testbed-http-port 9857)
+(define-configurable current-testbed-log-level 'info)
 (define-configurable current-testbed-tasks
   `(((name . "test")
      (description . "sample test task")
@@ -908,7 +909,7 @@
               (("-c" "--config") path "Configuration file path"
                                  (current-configuration-path (path->complete-path path))))
 (module+ main
-  (parameterize ((current-logger (make-logging 'info 'testbed)))
+  (parameterize ((current-logger (make-logging (current-testbed-log-level) 'testbed)))
     (void (preflight)
           (main)
           (sync never-evt))))
