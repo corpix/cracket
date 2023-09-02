@@ -44,6 +44,8 @@ in {
       isSystemUser = true;
       group = name;
       extraGroups = ["systemd-journal"];
+      home = "/var/lib/${name}";
+      createHome = true;
     };
 
     systemd.services.${name} = {
@@ -54,6 +56,8 @@ in {
       serviceConfig = {
         Type = "simple";
         User = name;
+        WorkingDirectory = "/var/lib/${name}";
+        Environment = "NIX_PATH=${concatStringsSep ":" config.nix.nixPath}";
         ExecStart = "${pkgs.testbed}/bin/testbed ${optionalString (cfg.configuration != null) "-c ${mkConfig cfg.configuration}"}";
         Restart = "on-failure";
         RestartSec = 5;
