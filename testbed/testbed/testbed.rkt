@@ -86,6 +86,7 @@
                         "--dev-bind" "/dev" "/dev"
                         "--tmpfs" "/home"
                         "--tmpfs" "/tmp"
+                        "--tmpfs" "/run/user"
                         "--tmpfs" ,(format "/run/user/~a" (getuid))
                         "--proc" "/proc")
                        "nix-shell"
