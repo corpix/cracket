@@ -10,8 +10,7 @@
          corpix/time
          corpix/hex
          corpix/prometheus
-         corpix/configuration
-         (for-syntax corpix/syntax))
+         corpix/configuration)
 (module+ test
   (require rackunit))
 
