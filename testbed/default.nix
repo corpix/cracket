@@ -618,7 +618,9 @@
 
   path = with pkgs; [
     bash
+    coreutils
     nix
+    bubblewrap
   ];
   libs = with pkgs; [
     sqlite
