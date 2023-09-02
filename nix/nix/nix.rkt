@@ -112,7 +112,8 @@
                       (list user repo rev path)))))
         (~a "https://github.com/" user "/" repo ".git"
             (if (and path (> (string-length path) 0)) (~a "?path=" path) "")
-            (if rev (~a "#" rev) ""))))
+            ;; (if rev (~a "#" rev) "")
+            )))
      (else url))))
 
 ;;
@@ -424,5 +425,5 @@
 (current-packages (catalogs->packages (cons "file:///home/user/projects/src/git.backbone/corpix/cracket/.catalog"
                                             (current-package-catalog-urls))))
 
-(define test-package (hash-ref (current-packages) "corpix-firewalld"))
+(define test-package (hash-ref (current-packages) "mime-type"))
 (displayln (nix-generate (package->nix test-package)))
